@@ -1,0 +1,18 @@
+# Editor / IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PlatformIO / embedded build outputs
+.pio/
+build/
+.vs/
+
+# OS files
+.DS_Store
+Thumbs.db
