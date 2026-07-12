@@ -16,3 +16,8 @@ build/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local AI-assistant / analysis artifacts (not part of the product)
+.claude/
+CLAUDE.md
+graphify-out/
