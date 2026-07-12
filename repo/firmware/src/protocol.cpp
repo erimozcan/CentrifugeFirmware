@@ -66,12 +66,30 @@ size_t appendInt32(char *out, size_t maxLen, size_t idx, int32_t value) {
   return idx;
 }
 
+Print *g_out = &Serial;   // reply sink; default = USB serial
+
 bool writeLineNonBlocking(const char *line, size_t len) {
-  if (Serial.availableForWrite() < static_cast<int>(len)) {
-    return false;
+  // Redirected sink (e.g. WebSocket capture): just write it, no Serial back-pressure logic.
+  if (g_out != &Serial) {
+    g_out->write(reinterpret_cast<const uint8_t *>(line), len);
+    return true;
   }
+  // Skip only when the whole line won't fit, so the master's tick loop never
+  // stalls waiting on a host that stopped reading.
+  if (Serial.availableForWrite() >= static_cast<int>(len)) {
+    Serial.write(reinterpret_cast<const uint8_t *>(line), len);
+    return true;
+  }
+#if defined(ARDUINO_ARCH_ESP32)
+  // USB-CDC reports a small availableForWrite() (< a full STATUS line) even when
+  // there is room, so honoring the guard above would silently drop replies.
+  // Write anyway -- USB-CDC write is bounded (it drops when the host is absent),
+  // so this can't hang the loop.
   Serial.write(reinterpret_cast<const uint8_t *>(line), len);
   return true;
+#else
+  return false;
+#endif
 }
 
 }  // namespace
@@ -163,8 +181,14 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
   idx = appendLiteral(line, sizeof(line), idx, " FAULT=");
   idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.fault));
 
+  // LOCK = lock *sensor* (lockConfirmed); open-loop on the Nano (no sensor -> floats
+  // "confirmed"). LOCKCMD = the actuator position we last *commanded* (1=locked), which
+  // is the true feedback for the lock buttons during bring-up.
   idx = appendLiteral(line, sizeof(line), idx, " LOCK=");
   idx = appendInt32(line, sizeof(line), idx, ctx.lockConfirmed ? 1 : 0);
+
+  idx = appendLiteral(line, sizeof(line), idx, " LOCKCMD=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.lockActuatorCommanded ? 1 : 0);
 
   idx = appendLiteral(line, sizeof(line), idx, " ENABLE=");
   idx = appendInt32(line, sizeof(line), idx, ctx.motorEnableOutput ? 1 : 0);
@@ -172,11 +196,59 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
   idx = appendLiteral(line, sizeof(line), idx, " DOOR=");
   idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.doorState));
 
+  // DOORMOVE=1 while a motorized move is in progress; DOORCMD is the drive direction
+  // (-1 opening, 0 stopped, 1 closing). Together they let the UI show live motion.
+  idx = appendLiteral(line, sizeof(line), idx, " DOORMOVE=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.doorMoveActive ? 1 : 0);
+
+  idx = appendLiteral(line, sizeof(line), idx, " DOORCMD=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.doorMotorCommand));
+
+  idx = appendLiteral(line, sizeof(line), idx, " DOORPWM=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.doorPwmDuty));
+
+  // Gantry indexing: TUBE = the position it's parked at (0 = unknown, e.g. after a spin);
+  // ROTTGT = the tube an in-progress rotate is heading to (0 when not rotating).
+  idx = appendLiteral(line, sizeof(line), idx, " TUBE=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.currentTube));
+  idx = appendLiteral(line, sizeof(line), idx, " HOMED=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.homed ? 1 : 0);
+  idx = appendLiteral(line, sizeof(line), idx, " ROTTGT=");
+  {
+    bool rotating = (ctx.state == STATE_ROTATE_RELEASE || ctx.state == STATE_ROTATE_MOVING ||
+                     ctx.state == STATE_ROTATE_ENGAGE);
+    idx = appendInt32(line, sizeof(line), idx, rotating ? static_cast<int32_t>(ctx.rotateTube) : 0);
+  }
+
+  // Raw hall pin levels (1=HIGH) so the UI/console can verify polarity vs the
+  // DOOR_*_ACTIVE_LOW config during door bring-up, independent of interpretation.
+  idx = appendLiteral(line, sizeof(line), idx, " HOPEN=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.doorOpenHallRaw));
+
+  idx = appendLiteral(line, sizeof(line), idx, " HCLOSED=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.doorClosedHallRaw));
+
   idx = appendLiteral(line, sizeof(line), idx, " TEMP_ADC=");
   idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.ntcAdc));
 
   idx = appendLiteral(line, sizeof(line), idx, " FAN=");
   idx = appendInt32(line, sizeof(line), idx, ctx.fanEnabled ? 1 : 0);
+
+  idx = appendLiteral(line, sizeof(line), idx, " POWER=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.devicePowered ? 1 : 0);
+
+  // AUDIO = 1 if the DFPlayer PRO initialized OK (module wired + powered), else 0.
+  idx = appendLiteral(line, sizeof(line), idx, " AUDIO=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.audioReady ? 1 : 0);
+
+  idx = appendLiteral(line, sizeof(line), idx, " LEDMODE=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.ledMode));
+  idx = appendLiteral(line, sizeof(line), idx, " LEDR=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.ledR));
+  idx = appendLiteral(line, sizeof(line), idx, " LEDG=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.ledG));
+  idx = appendLiteral(line, sizeof(line), idx, " LEDB=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.ledB));
 
   if (idx >= sizeof(line) - 1U) {
     return false;
@@ -185,5 +257,8 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
   line[idx++] = '\n';
   return writeLineNonBlocking(line, idx);
 }
+
+void setOutput(Print *out) { g_out = out ? out : &Serial; }
+Print *output() { return g_out; }
 
 }  // namespace Protocol

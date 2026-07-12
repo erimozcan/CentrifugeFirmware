@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Centrifuge Spindle Dashboard</title>
+<style>
+  :root { --bg:#0f1216; --panel:#191e26; --fg:#e6edf3; --mut:#8b97a7; --accent:#4fa3ff; --ok:#3fb950; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; display:flex; align-items:center; gap:14px; border-bottom:1px solid #262c36; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  #conn { font-size:13px; padding:3px 10px; border-radius:12px; background:#33121a; color:var(--bad); }
+  #conn.up { background:#0f2a16; color:var(--ok); }
+  main { display:grid; grid-template-columns: 320px 1fr; gap:16px; padding:16px; }
+  .panel { background:var(--panel); border:1px solid #262c36; border-radius:10px; padding:16px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mut); margin:0 0 12px; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:10px; }
+  .row label { width:90px; font-size:13px; color:var(--mut); }
+  input[type=number]{ flex:1; background:#0f1216; border:1px solid #2c333d; color:var(--fg); border-radius:6px; padding:7px; }
+  button { background:#23303f; color:var(--fg); border:1px solid #33414f; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#2c3d4f; }
+  button.go { background:#13361c; border-color:#1f5a2e; }
+  button.stop { background:#3a1620; border-color:#5a232f; }
+  .btns { display:flex; gap:8px; flex-wrap:wrap; }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin-top:6px; }
+  .stat .k { font-size:11px; color:var(--mut); text-transform:uppercase; }
+  .stat .v { font-size:22px; font-variant-numeric:tabular-nums; }
+  canvas { display:block; width:100%; }
+  .gaugewrap { display:flex; justify-content:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Centrifuge Spindle</h1>
+  <span id="conn">disconnected</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Control</h2>
+    <div class="btns" style="margin-bottom:14px">
+      <button class="go" onclick="send('E')">Enable</button>
+      <button onclick="send('D')">Disable</button>
+      <button class="stop" onclick="rampStop()">Stop (ramp 0)</button>
+    </div>
+    <div class="row">
+      <label>Target</label>
+      <input id="tgt" type="number" step="0.1" value="1" />
+      <span style="color:var(--mut);font-size:12px">rev/s</span>
+    </div>
+    <div class="row">
+      <label>Ramp accel</label>
+      <input id="acc" type="number" step="0.5" value="5" />
+      <span style="color:var(--mut);font-size:12px">rev/s²</span>
+    </div>
+    <div class="btns">
+      <button class="go" onclick="setTarget()">Set target</button>
+      <button onclick="setAccel()">Set accel</button>
+    </div>
+
+    <h2 style="margin-top:22px">Live</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Angle</div><div class="v"><span id="angv">0.0</span>°</div></div>
+      <div class="stat"><div class="k">Velocity</div><div class="v"><span id="velv">0.00</span></div></div>
+      <div class="stat"><div class="k">Setpoint</div><div class="v"><span id="tgv">0.00</span></div></div>
+      <div class="stat"><div class="k">Enabled</div><div class="v"><span id="env">no</span></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Absolute encoder angle</h2>
+    <div class="gaugewrap"><canvas id="gauge" width="260" height="260"></canvas></div>
+    <h2 style="margin-top:20px">Velocity (rev/s) — measured vs setpoint</h2>
+    <canvas id="plot" width="760" height="220"></canvas>
+  </section>
+</main>
+
+<script>
+let ws, last = {ang:0, vel:0, tgt:0, cmd:0, en:0, connected:false};
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = (e) => { last = JSON.parse(e.data); render(); };
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd})); }
+function setTarget() { send('V ' + parseFloat(document.getElementById('tgt').value || 0)); }
+function setAccel()  { send('A ' + parseFloat(document.getElementById('acc').value || 0)); }
+function rampStop()  { document.getElementById('tgt').value = 0; send('S'); }
+
+// rolling velocity history
+const N = 240, vHist = new Array(N).fill(0), tHist = new Array(N).fill(0);
+
+function render() {
+  const c = document.getElementById('conn');
+  c.textContent = last.connected ? 'connected' : 'disconnected';
+  c.classList.toggle('up', !!last.connected);
+
+  const deg = (last.ang * 180 / Math.PI);
+  document.getElementById('angv').textContent = deg.toFixed(1);
+  document.getElementById('velv').textContent = last.vel.toFixed(2);
+  document.getElementById('tgv').textContent  = last.tgt.toFixed(2);
+  document.getElementById('env').textContent  = last.en ? 'yes' : 'no';
+
+  vHist.push(last.vel); vHist.shift();
+  tHist.push(last.tgt); tHist.shift();
+  drawGauge(last.ang);
+  drawPlot();
+}
+
+function drawGauge(angRad) {
+  const cv = document.getElementById('gauge'), g = cv.getContext('2d');
+  const w = cv.width, h = cv.height, cx = w/2, cy = h/2, r = 110;
+  g.clearRect(0,0,w,h);
+  g.strokeStyle = '#2c333d'; g.lineWidth = 10;
+  g.beginPath(); g.arc(cx, cy, r, 0, 2*Math.PI); g.stroke();
+  // ticks
+  g.strokeStyle = '#3a4451'; g.lineWidth = 2;
+  for (let i=0;i<12;i++){ const a=i*Math.PI/6; g.beginPath();
+    g.moveTo(cx+Math.cos(a)*(r-6), cy+Math.sin(a)*(r-6));
+    g.lineTo(cx+Math.cos(a)*(r+6), cy+Math.sin(a)*(r+6)); g.stroke(); }
+  // needle (0 rad = up, clockwise)
+  const a = angRad - Math.PI/2;
+  g.strokeStyle = '#4fa3ff'; g.lineWidth = 4; g.lineCap='round';
+  g.beginPath(); g.moveTo(cx,cy); g.lineTo(cx+Math.cos(a)*(r-18), cy+Math.sin(a)*(r-18)); g.stroke();
+  g.fillStyle = '#4fa3ff'; g.beginPath(); g.arc(cx,cy,6,0,2*Math.PI); g.fill();
+  g.fillStyle = '#e6edf3'; g.font='22px system-ui'; g.textAlign='center';
+  g.fillText((angRad*180/Math.PI).toFixed(1)+'°', cx, cy+r+28);
+}
+
+function drawPlot() {
+  const cv = document.getElementById('plot'), p = cv.getContext('2d');
+  const w = cv.width, h = cv.height, pad = 24;
+  p.clearRect(0,0,w,h);
+  let max = 1;
+  for (const v of vHist) max = Math.max(max, Math.abs(v));
+  for (const v of tHist) max = Math.max(max, Math.abs(v));
+  max *= 1.2;
+  // zero axis
+  const y0 = h/2;
+  p.strokeStyle = '#2c333d'; p.lineWidth=1;
+  p.beginPath(); p.moveTo(pad,y0); p.lineTo(w-pad,y0); p.stroke();
+  const X = i => pad + (i/(N-1))*(w-2*pad);
+  const Y = v => y0 - (v/max)*(h/2-pad);
+  const line = (arr,col) => { p.strokeStyle=col; p.lineWidth=2; p.beginPath();
+    arr.forEach((v,i)=>{ const x=X(i),y=Y(v); i?p.lineTo(x,y):p.moveTo(x,y); }); p.stroke(); };
+  line(tHist, '#8b97a7');  // setpoint
+  line(vHist, '#4fa3ff');  // measured
+  p.fillStyle='#8b97a7'; p.font='11px system-ui'; p.textAlign='left';
+  p.fillText('measured', pad, 14); p.fillStyle='#5a6675'; p.fillText('— setpoint', pad+70, 14);
+  p.fillText('±'+max.toFixed(1)+' rev/s', w-pad-90, 14);
+}
+
+connect();
+drawGauge(0); drawPlot();
+</script>
+</body>
+</html>

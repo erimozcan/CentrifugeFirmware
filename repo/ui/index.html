@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<!--
+  Centrifuge operator UI — premium machine console.
+
+  Talks to the Arduino Nano ESP32 master controller directly over USB (Web Serial,
+  Chrome/Edge only). Line protocol: "<seq> CMD args\n" -> "<seq> OK ..."/"<seq> ERR
+  CODE=...", polling STATUS for telemetry.
+
+  The hero is the product render (assets/centrifuge.mp4). A scene controller maps the
+  live machine STATE to a time-segment of the render (idle / opening / open / spinning
+  / closing) so the big visual always shows what the device is physically doing.
+
+  PRIMARY controls (this is the whole operator surface):
+    • Door   — open / close
+    • Tube   — pick which of the 4 tube positions to present (ROTATE)
+    • Centrifuge — set speed + time, RUN (auto-arms). Abort / E-STOP always available.
+  Everything else (per-subsystem diagnostics, manual lock/unlock, home, audio test,
+  raw indicators, serial console) lives in the two dropdowns at the bottom.
+
+  Serve from localhost for a secure Web Serial context:
+      python -m http.server 8080     (from this folder)
+  then open http://localhost:8080/
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Centrifuge Console · Tripathi Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#080a0e; --bg2:#0c0f15;
+    --panel:#12161d; --panel2:#161b23; --panel3:#1b212b;
+    --line:#ffffff12; --line2:#ffffff1f; --line3:#ffffff33;
+    --txt:#eef2f8; --txt2:#a9b4c2; --txt3:#68727f;
+    --accent:#5b93ff; --accent2:#84b0ff; --accent-dim:#5b93ff26;
+    --ok:#37c96f; --warn:#f4ab3d; --bad:#ff5a52;
+    --radius:16px; --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; color:var(--txt);
+    background:
+      radial-gradient(1200px 700px at 78% -10%, #16203a 0%, transparent 55%),
+      radial-gradient(900px 600px at 5% 8%, #101722 0%, transparent 50%),
+      var(--bg);
+    font:15px/1.55 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+  .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  /* ---------- header ---------- */
+  header { display:flex; align-items:center; gap:14px; padding:13px 22px;
+    background:#0a0d12cc; backdrop-filter:saturate(140%) blur(10px);
+    border-bottom:1px solid var(--line); position:sticky; top:0; z-index:20; }
+  .brand { display:flex; align-items:baseline; gap:10px; }
+  .brand .mark { font-weight:800; letter-spacing:.5px; font-size:15px; }
+  .brand .sub { font-size:11px; color:var(--txt3); font-weight:600; letter-spacing:1.2px; text-transform:uppercase; }
+  .grow { flex:1; }
+  .conn { display:flex; align-items:center; gap:9px; padding:5px 11px; border:1px solid var(--line2);
+    border-radius:999px; background:#ffffff08; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--bad); box-shadow:0 0 0 3px #ff5a5222; transition:.2s; }
+  .dot.on { background:var(--ok); box-shadow:0 0 0 3px #37c96f22, 0 0 12px #37c96f88; }
+  .conn .txt { font-size:11px; color:var(--txt2); font-family:var(--mono); white-space:nowrap; }
+
+  button { font:inherit; font-weight:600; color:var(--txt); background:#ffffff0d;
+    border:1px solid var(--line2); border-radius:11px; padding:10px 16px; cursor:pointer;
+    transition:.14s ease; letter-spacing:.2px; }
+  button:hover:not(:disabled) { background:#ffffff17; border-color:var(--line3); transform:translateY(-1px); }
+  button:active:not(:disabled) { transform:translateY(0); }
+  button:disabled { opacity:.32; cursor:not-allowed; }
+  button.primary { background:linear-gradient(180deg,#6a9dff,#3f79ff); border-color:#3f79ff; color:#fff;
+    box-shadow:0 6px 18px -8px #3f79ffcc; }
+  button.primary:hover:not(:disabled) { background:linear-gradient(180deg,#7dabff,#4f86ff); }
+  button.ghost { background:transparent; }
+  button.estop { background:linear-gradient(180deg,#ff6b63,#e0392f); border-color:#e0392f; color:#fff;
+    font-weight:800; letter-spacing:.6px; box-shadow:0 6px 18px -8px #ff5a52aa; }
+  button.estop:hover:not(:disabled) { background:linear-gradient(180deg,#ff7d75,#ef4339); }
+  button.power.on { background:linear-gradient(180deg,#40d178,#22a457); border-color:#22a457; color:#04140a; }
+  .btn-lg { padding:14px 18px; font-size:15px; border-radius:13px; }
+
+  main { max-width:1180px; margin:0 auto; padding:22px; display:grid; gap:20px; }
+
+  /* ---------- hero ---------- */
+  .hero { position:relative; border-radius:var(--radius); overflow:hidden; border:1px solid var(--line2);
+    background:#04060a; box-shadow:0 24px 60px -30px #000; isolation:isolate; }
+  .hero video { display:block; width:100%; height:clamp(240px,42vh,440px); object-fit:cover; object-position:center 46%; }
+  .hero .veil { position:absolute; inset:0; pointer-events:none;
+    background:
+      linear-gradient(90deg, #05070bE6 0%, #05070b55 26%, transparent 50%, #05070b55 76%, #05070bcc 100%),
+      linear-gradient(0deg, #05070bF2 2%, transparent 34%, transparent 72%, #05070b66 100%); }
+  body[data-scene="spin"] .hero { border-color:#5b93ff55; box-shadow:0 0 0 1px #5b93ff33, 0 24px 70px -28px #1d3a7d; }
+  body[data-scene="spin"] .hero::after { content:""; position:absolute; inset:0; pointer-events:none;
+    box-shadow:inset 0 0 120px -30px #5b93ff66; animation:pulse 2.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:.85} }
+
+  .hud { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:space-between;
+    padding:20px 24px; pointer-events:none; }
+  .hud .top { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .scenePill { display:inline-flex; align-items:center; gap:9px; padding:7px 14px; border-radius:999px;
+    background:#0a0e15b0; border:1px solid var(--line2); backdrop-filter:blur(6px); font-weight:600; font-size:13px; }
+  .scenePill .led { width:8px; height:8px; border-radius:50%; background:var(--txt3); }
+  .scenePill.run .led { background:var(--accent); box-shadow:0 0 10px var(--accent); animation:blink 1.4s infinite; }
+  .scenePill.good .led{ background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .scenePill.fault{ border-color:#ff5a5255; color:#ffb4b0; } .scenePill.fault .led{ background:var(--bad); box-shadow:0 0 10px var(--bad); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
+  #btnClear { pointer-events:auto; }
+
+  .hud .bottom { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .readout .lbl { font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--txt2); font-weight:600; }
+  .readout .rpm { font-family:var(--mono); font-weight:600; font-size:clamp(44px,7vw,76px); line-height:.95;
+    letter-spacing:-1px; text-shadow:0 2px 24px #000a; }
+  .readout .rpm small { font-size:.32em; color:var(--txt2); font-weight:500; margin-left:8px; letter-spacing:0; }
+  .readout .tgt { font-size:13px; color:var(--txt2); margin-top:2px; }
+  .readout .tgt b { color:var(--txt); font-family:var(--mono); }
+  .metaCol { text-align:right; }
+  .metaCol .big { font-size:15px; font-weight:700; }
+  .metaCol .sm { font-size:12px; color:var(--txt2); }
+  .pbar { position:absolute; left:0; right:0; bottom:0; height:4px; background:#ffffff14; pointer-events:none; }
+  .pbar > i { display:block; height:100%; width:0; background:linear-gradient(90deg,#5b93ff,#84b0ff);
+    box-shadow:0 0 12px #5b93ff; transition:width .3s ease; }
+
+  /* ---------- control deck ---------- */
+  .deck { display:grid; grid-template-columns:1fr 1fr 1.25fr; gap:18px; }
+  @media (max-width:900px){ .deck { grid-template-columns:1fr; } }
+  .panel { background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid var(--line);
+    border-radius:var(--radius); padding:18px 20px; display:flex; flex-direction:column; }
+  .panel > h2 { margin:0 0 4px; font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:var(--txt3);
+    font-weight:700; display:flex; align-items:center; gap:8px; }
+  .panel .sub { color:var(--txt2); font-size:12px; margin-bottom:14px; }
+  .panel .spacer { flex:1; }
+
+  .statechip { margin-left:auto; font-family:var(--mono); font-size:11px; padding:3px 9px; border-radius:999px;
+    background:#ffffff0d; border:1px solid var(--line2); color:var(--txt2); font-weight:600; }
+  .statechip.good{ color:#8fe6ac; border-color:#37c96f44; background:#37c96f14; }
+  .statechip.warn{ color:#ffcf8a; border-color:#f4ab3d44; background:#f4ab3d14; }
+  .statechip.run { color:var(--accent2); border-color:#5b93ff55; background:#5b93ff18; }
+  .statechip.bad { color:#ffb0ac; border-color:#ff5a5255; background:#ff5a5218; }
+
+  .bigrow { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .bigrow.solo { grid-template-columns:1fr; }
+
+  /* door glyph */
+  .doorViz { display:flex; align-items:center; justify-content:center; gap:14px; padding:8px 0 14px; }
+  .doorGlyph { width:64px; height:64px; position:relative; }
+
+  /* tube dial */
+  .dialWrap { display:flex; justify-content:center; padding:4px 0 10px; }
+  .dial { width:184px; height:184px; }
+  .dial .ring { fill:none; stroke:var(--line2); stroke-width:2; }
+  .dial .spoke { stroke:var(--line); stroke-width:1.5; }
+  .dial .hub { fill:#0e131b; stroke:var(--line2); stroke-width:1.5; }
+  .dial .pos { fill:#0f151d; stroke:var(--line3); stroke-width:2; cursor:pointer; transition:.15s; }
+  .dial .pos:hover { fill:#1a2331; stroke:var(--accent); }
+  .dial .pos.active { fill:url(#tg); stroke:var(--accent); filter:drop-shadow(0 0 8px #5b93ffaa); }
+  .dial .plabel { fill:var(--txt2); font:600 15px var(--mono); text-anchor:middle; dominant-baseline:central; pointer-events:none; }
+  .dial .pos.active + .plabel, .dial text.active { fill:#fff; }
+  .dial .center { fill:var(--txt); font:700 26px var(--mono); text-anchor:middle; dominant-baseline:central; }
+  .dial .csub { fill:var(--txt3); font:600 9px 'Inter'; letter-spacing:2px; text-anchor:middle; }
+  .dial.indexing { animation:spin 2s linear infinite; transform-origin:50% 50%; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  label.field { color:var(--txt2); font-size:11px; letter-spacing:.6px; text-transform:uppercase; font-weight:600;
+    display:flex; flex-direction:column; gap:6px; }
+  label.field input { background:#0b0f15; border:1px solid var(--line2); color:var(--txt); border-radius:10px;
+    padding:11px 12px; font:600 16px var(--mono); width:100%; }
+  label.field input:focus { outline:none; border-color:var(--accent); background:#0d1219; box-shadow:0 0 0 3px var(--accent-dim); }
+  .fields { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:14px; }
+
+  .btnrow { display:flex; gap:10px; }
+  .btnrow > * { flex:1; }
+
+  /* ---------- dropdowns (debug + console) ---------- */
+  .drawer { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+  .drawer > summary { cursor:pointer; list-style:none; padding:15px 20px; font-size:12px; font-weight:700;
+    letter-spacing:1.2px; text-transform:uppercase; color:var(--txt2); display:flex; align-items:center; gap:10px; }
+  .drawer > summary::-webkit-details-marker { display:none; }
+  .drawer > summary::before { content:'▸'; color:var(--txt3); font-size:11px; transition:.15s; }
+  .drawer[open] > summary::before { transform:rotate(90deg); }
+  .drawer > summary:hover { color:var(--txt); }
+  .drawer .body { padding:6px 20px 20px; border-top:1px solid var(--line); display:grid; gap:16px; }
+  .subcard { background:#0c1016; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .subcard h3 { margin:0 0 10px; font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--txt3); font-weight:700; }
+  .row { display:flex; flex-wrap:wrap; gap:9px; align-items:center; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:9px; }
+  .ind { background:#0e131a; border:1px solid var(--line); border-radius:9px; padding:8px 10px; }
+  .ind .k { color:var(--txt3); font-size:9.5px; text-transform:uppercase; letter-spacing:.7px; font-weight:700; }
+  .ind .v { font-weight:600; font-family:var(--mono); margin-top:3px; font-size:13px; }
+  .ind .v.good { color:var(--ok); } .ind .v.bad { color:var(--bad); } .ind .v.warn { color:var(--warn); }
+
+  .audioGrid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
+  .audioGrid button { padding:8px 6px; font-size:12px; }
+  input[type=range] { accent-color:var(--accent); width:100%; }
+  input[type=text]#rawCmd { flex:1; background:#0b0f15; border:1px solid var(--line2); color:var(--txt);
+    border-radius:10px; padding:10px 12px; font:13px var(--mono); }
+  input:focus { outline:none; }
+
+  #log { background:#06090d; border:1px solid var(--line); border-radius:10px; padding:12px;
+    font:12px/1.55 var(--mono); height:200px; overflow:auto; white-space:pre-wrap; color:var(--txt2); }
+  .log-tx { color:var(--accent2); } .log-rx { color:#7fe0a3; } .log-esc { color:var(--txt3); } .log-err { color:#ff8f88; }
+  .hint { color:var(--txt3); font-size:12px; margin-top:10px; line-height:1.5; }
+  .tag { margin-left:auto; font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:var(--warn);
+    border:1px solid #f4ab3d44; background:#f4ab3d14; padding:2px 8px; border-radius:999px; }
+
+  /* ---------- header logo chip (white bg so the dark-ink logo reads on the dark header) ---------- */
+  .hdr-logo-wrap { background:#fff; border-radius:8px; padding:4px 8px; display:inline-flex; align-items:center; }
+  .hdr-logo { height:26px; width:auto; display:block; }
+
+  /* ---------- power gate: the "first page" shown until the device is powered on ---------- */
+  #gate { display:none; }
+  body:not(.powered) { background:#ffffff; color:#20242b; }
+  body:not(.powered) header { display:none; }
+  body:not(.powered) main { max-width:820px; }
+  body:not(.powered) .deck,
+  body:not(.powered) .drawer { display:none; }
+  body:not(.powered) .veil,
+  body:not(.powered) .hud,
+  body:not(.powered) .pbar { display:none; }               /* keep the animation, drop the dark overlays/HUD */
+  body:not(.powered) .hero { border-color:#e8e8ea; background:#fff; box-shadow:0 22px 50px -34px #00000033; }
+  body:not(.powered) #gate {
+    display:flex; flex-direction:column; align-items:center; gap:20px; padding:30px 20px 10px; text-align:center; }
+  #gate .builtby { font-size:12px; letter-spacing:3.5px; text-transform:uppercase; color:#9aa0a8; font-weight:700; }
+  #gate .lab-logo { width:min(440px,84vw); height:auto; }
+  #gate #btnGatePower {
+    padding:15px 46px; font-size:17px; font-weight:700; border-radius:14px; color:#04140a;
+    background:linear-gradient(180deg,#40d178,#22a457); border-color:#22a457;
+    box-shadow:0 10px 26px -12px #22a457aa; }
+  #gate #btnGatePower:hover:not(:disabled) { background:linear-gradient(180deg,#4ade86,#28b25f); transform:translateY(-1px); }
+  #gate #btnGatePower:disabled { opacity:.45; }
+  #gate #btnGateConnect {
+    padding:15px 46px; font-size:17px; font-weight:700; border-radius:14px; color:#fff;
+    background:linear-gradient(180deg,#6a9dff,#3f79ff); border-color:#3f79ff; box-shadow:0 10px 26px -12px #3f79ffaa; }
+  #gate #btnGateConnect:hover:not(:disabled) { background:linear-gradient(180deg,#7dabff,#4f86ff); transform:translateY(-1px); }
+  #gate .gate-hint { font-size:13px; color:#a2a8b0; }
+</style>
+</head>
+<body data-scene="idle">
+<header>
+  <span class="hdr-logo-wrap"><img class="hdr-logo" style="height:26px;width:auto" src="assets/logo.svg" alt="Tripathi Lab"></span>
+  <div class="brand"><span class="mark">CENTRIFUGE</span><span class="sub">Tripathi Lab</span></div>
+  <span class="grow"></span>
+  <span class="conn"><span class="dot" id="dot"></span><span class="txt" id="connName">offline</span></span>
+  <button id="btnConnect" class="primary">Connect</button>
+  <button id="btnPower" class="power ctl" disabled>⏻ Power</button>
+  <button id="btnEstop" class="estop ctl" disabled>E-STOP</button>
+</header>
+
+<main>
+  <!-- ===== hero: live render + HUD ===== -->
+  <section class="hero">
+    <video id="hero" muted playsinline webkit-playsinline autoplay preload="auto" poster="assets/poster.jpg"></video>
+    <div class="veil"></div>
+    <div class="hud">
+      <div class="top">
+        <span class="scenePill" id="scenePill"><span class="led"></span><span id="sceneText">Offline</span></span>
+        <button id="btnClear" class="estop ctl" style="display:none">Clear fault</button>
+      </div>
+      <div class="bottom">
+        <div class="readout">
+          <div class="lbl">Rotor speed</div>
+          <div class="rpm mono"><span id="rpmActual">—</span><small>RPM</small></div>
+          <div class="tgt">target <b id="rpmTarget">—</b> · <span id="stateName" class="mono">—</span></div>
+        </div>
+        <div class="metaCol">
+          <div class="big" id="metaTube">Tube —</div>
+          <div class="sm" id="metaDoor">Door —</div>
+          <div class="sm" id="metaLock">Lock —</div>
+        </div>
+      </div>
+    </div>
+    <div class="pbar"><i id="rpmBar"></i></div>
+  </section>
+
+  <!-- ===== power gate: the whole console is hidden behind this until Power on ===== -->
+  <section id="gate">
+    <div class="builtby">built by</div>
+    <img class="lab-logo" style="width:min(440px,84vw);height:auto" src="assets/logo.svg" alt="Tripathi Lab · Brown University">
+    <button id="btnGateConnect" style="display:none">🔌 Connect</button>
+    <button id="btnGatePower" class="ctl">⏻ Power on</button>
+    <div class="gate-hint" id="gateHint">Turn the centrifuge on to begin.</div>
+  </section>
+
+  <!-- ===== primary control deck ===== -->
+  <div class="deck">
+
+    <!-- DOOR -->
+    <section class="panel">
+      <h2>Door <span class="statechip" id="doorChip">—</span></h2>
+      <div class="sub">Open to load or unload samples.</div>
+      <div class="doorViz"><svg class="doorGlyph" id="doorGlyph" viewBox="0 0 64 64"></svg></div>
+      <div class="spacer"></div>
+      <div class="bigrow">
+        <button id="btnDoorOpen" class="ctl btn-lg">▲ Open</button>
+        <button id="btnDoorClose" class="ctl btn-lg">▼ Close</button>
+      </div>
+    </section>
+
+    <!-- TUBE -->
+    <section class="panel">
+      <h2>Tube position <span class="statechip" id="tubeChip">—</span></h2>
+      <div class="sub">Index a tube to the pipette.</div>
+      <div class="dialWrap">
+        <svg class="dial" id="dial" viewBox="0 0 200 200">
+          <defs><radialGradient id="tg" cx="50%" cy="50%" r="60%">
+            <stop offset="0%" stop-color="#3f79ff"/><stop offset="100%" stop-color="#2b57c9"/></radialGradient></defs>
+          <circle class="ring" cx="100" cy="100" r="70"/>
+          <line class="spoke" x1="100" y1="30" x2="100" y2="170"/>
+          <line class="spoke" x1="30" y1="100" x2="170" y2="100"/>
+          <g id="dialPos"></g>
+          <circle class="hub" cx="100" cy="100" r="30"/>
+          <text class="center" id="dialCenter" x="100" y="97">—</text>
+          <text class="csub" x="100" y="115">TUBE</text>
+        </svg>
+      </div>
+      <div class="spacer"></div>
+      <div class="hint" id="tubeHint" style="margin-top:0">Gantry locks at rest; a spin re-indexes to the nearest position.</div>
+    </section>
+
+    <!-- CENTRIFUGE -->
+    <section class="panel">
+      <h2>Centrifuge <span class="statechip" id="runChip">—</span></h2>
+      <div class="sub">Set the speed and time, then run. Arming is automatic.</div>
+      <div class="fields">
+        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="4000" step="100"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 4000</span></label>
+        <label class="field">Time<input type="number" id="inTime" value="10" min="0" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds hold</span></label>
+        <label class="field">Ramp<input type="number" id="inRamp" value="10" min="1" max="120"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds</span></label>
+      </div>
+      <div class="spacer"></div>
+      <div class="btnrow">
+        <button id="btnRun" class="primary btn-lg" style="flex:2">▶ Run cycle</button>
+        <button id="btnAbort" class="ctl btn-lg">■ Abort</button>
+      </div>
+      <div class="hint">Run = close door → release lock → ramp 0→speed → hold → ramp down → re-index → lock → open door. E-STOP unwinds anytime.</div>
+    </section>
+  </div>
+
+  <!-- ===== debug / diagnostics dropdown ===== -->
+  <details class="drawer" id="debugDrawer">
+    <summary>Debug &amp; diagnostics</summary>
+    <div class="body">
+      <div class="subcard">
+        <h3>Manual actions</h3>
+        <div class="row">
+          <button id="btnInit" class="ctl">Arm (Init)</button>
+          <button id="btnHome" class="ctl">⌂ Set home</button>
+          <button id="btnDoorStop" class="ctl">■ Door stop</button>
+          <button id="btnDbgLock" class="ctl">🔒 Lock</button>
+          <button id="btnDbgUnlock" class="ctl">🔓 Unlock</button>
+        </div>
+        <div class="hint">Manual lock/unlock overrides the automatic gantry policy while stopped (SAFE IDLE / BOOT);
+          it clears when a run or rotate starts, and the lock is always released while the rotor turns.</div>
+      </div>
+
+      <div class="subcard">
+        <h3>Audio · DFPlayer PRO <span class="statechip" id="audioChip" style="margin-left:8px">—</span></h3>
+        <div class="row" style="margin-bottom:10px">
+          <label class="field" style="flex-direction:row; align-items:center; gap:10px; text-transform:none; letter-spacing:0">
+            Volume <input type="range" id="volSlider" min="0" max="30" value="20" style="width:160px">
+            <span class="mono" id="volVal" style="color:var(--txt2)">20</span>
+          </label>
+        </div>
+        <div class="audioGrid" id="audioGrid"></div>
+        <div class="hint">Cues fire automatically on machine events; these buttons test each clip. 1 at speed · 2 door closing ·
+          3 door opening · 4 locking · 5 power on · 6 run complete · 7–10 tube four/one/three/two selected.</div>
+      </div>
+
+      <div class="subcard">
+        <h3>Live telemetry</h3>
+        <div class="grid" id="indicators"></div>
+      </div>
+    </div>
+  </details>
+
+  <!-- ===== serial console dropdown ===== -->
+  <details class="drawer">
+    <summary>Serial console</summary>
+    <div class="body">
+      <div id="log"></div>
+      <div class="row">
+        <input type="text" id="rawCmd" placeholder="raw command, e.g. STATUS">
+        <button id="btnRaw" class="ctl">Send</button>
+        <button id="btnClearLog">Clear</button>
+      </div>
+    </div>
+  </details>
+</main>
+
+<script>
+// ================= transport detection =================
+// Priority: (1) served by the ESP32 (a real host/IP over http) -> WebSocket to that host.
+// (2) opened locally (file:// or localhost) but told to talk WiFi -> WebSocket to a fixed
+//     host, via  window.__WS_HOST__  (baked into the self-contained "run from your Mac"
+//     build) or a  ?ws=192.168.4.1  URL param. This serves the heavy page locally/instantly
+//     and sends only the tiny control traffic over WiFi. (3) otherwise -> Web Serial (USB).
+const _params = new URLSearchParams(location.search);
+const forcedWsHost = (typeof window !== 'undefined' && typeof window.__WS_HOST__ === 'string' && window.__WS_HOST__)
+  || _params.get('ws') || '';
+const servedByDevice = location.protocol.startsWith('http') &&
+  !['localhost', '127.0.0.1', ''].includes(location.hostname);
+const transport = (servedByDevice || forcedWsHost) ? 'ws' : 'serial';
+const wsTarget = servedByDevice ? location.hostname : (forcedWsHost || location.hostname);
+
+// Web Serial is only required for the USB/PC path. On the device (WebSocket) skip it.
+if (transport === 'serial' && !('serial' in navigator)) {
+  document.body.innerHTML = '<div style="max-width:640px;margin:80px auto;padding:28px;background:#12161d;'
+    + 'border:1px solid #ffffff1f;border-radius:16px;color:#eef2f8;font:15px/1.6 Inter,system-ui,sans-serif">'
+    + '<h2 style="margin-top:0">Web Serial not available</h2><p>This console needs the Web Serial API — open it in '
+    + '<b>Google Chrome</b> or <b>Microsoft Edge</b> (desktop), served from <code>http://localhost:8080/</code>. '
+    + 'Or connect over WiFi (open the UI the controller serves) to use any browser, including iPad.</p></div>';
+  throw new Error('no web serial');
+}
+
+// ================= protocol / connection =================
+const BAUD = 115200;
+let port=null, reader=null, writer=null, keepReading=false, seq=0, rxBuf='';
+const pending = new Map();
+let lastStatus = null;
+
+const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN RAMP','SPIN HOLD','STOPPING','HARD STOP','FAULT',
+  'CLOSING','UNLOCKING','SETTLING','LOCKING','OPENING',      // 10-14 run cycle
+  'UNLOCKING','ROTATING','LOCKING','INDEXING'];               // 15-18 rotate / post-spin index
+const FAULT_NAMES = ['none','illegal state','bad command','hard stop','lock timeout','door invalid',
+  'door open in spin','door timeout','over temp','interlock unsafe','rotate timeout'];
+const SPIN_STATES = new Set([2,3,4,5,6,7]);      // rotor energised
+const ROTATE_STATES = new Set([15,16,17,18]);    // gantry indexing (door open)
+const STOPPED = st => st===0 || st===1;          // BOOT / SAFE IDLE
+
+const $ = id => document.getElementById(id);
+const delay = ms => new Promise(r=>setTimeout(r,ms));
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const log = (msg, cls='') => { const el=$('log'); if(!el) return;
+  const at = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  el.innerHTML += `<span class="${cls}">${msg}</span>\n`; if (at) el.scrollTop = el.scrollHeight; };
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: BAUD });
+    writer = port.writable.getWriter();
+    keepReading = true; readLoop(); setConnected(true);
+    const info = port.getInfo();
+    $('connName').textContent = info.usbVendorId
+      ? `${info.usbVendorId.toString(16)}:${(info.usbProductId||0).toString(16)}` : 'serial';
+    log('— connected —','log-esc'); startPolling();
+  } catch (e) { log('connect failed: '+e.message,'log-err'); }
+}
+async function disconnect() {
+  stopPolling(); keepReading=false;
+  try { if (reader){ await reader.cancel(); reader.releaseLock(); } } catch {}
+  try { if (writer) writer.releaseLock(); } catch {}
+  try { if (port) await port.close(); } catch {}
+  port=reader=writer=null; setConnected(false); log('— disconnected —','log-esc');
+}
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('btnConnect').textContent = on ? 'Disconnect' : 'Connect';
+  $('btnConnect').classList.toggle('primary', !on);
+  $('connName').textContent = on ? $('connName').textContent : 'offline';
+  document.querySelectorAll('.ctl').forEach(b => b.disabled = !on);
+  if (!on) { lastStatus=null; render(null); }
+  // Splash buttons: in USB (Web Serial) mode you must click Connect (a user gesture) before
+  // anything works, so show it until connected; then swap to Power on. WiFi mode auto-connects.
+  const showConnect = (transport === 'serial') && !on;
+  $('btnGateConnect').style.display = showConnect ? '' : 'none';
+  $('btnGatePower').style.display = showConnect ? 'none' : '';
+  $('gateHint').textContent = showConnect ? 'Connect over USB to begin.'
+    : (on ? 'Turn the centrifuge on to begin.' : 'Connecting…');
+}
+
+// ---- WebSocket transport (served by the ESP32 over WiFi) ----
+let wsock = null;
+function wsConnect() {
+  try {
+    wsock = new WebSocket(`ws://${wsTarget}:81/`);
+    wsock.onopen = () => {
+      setConnected(true); $('connName').textContent = wsTarget; log('— connected (wifi) —','log-esc');
+      heroReady = true; const s = curScene || 'idle'; curScene = null; setScene(s);   // now load the render
+      startPolling();
+    };
+    wsock.onmessage = ev => { String(ev.data).split('\n').forEach(l => { l = l.replace(/\r$/,'').trim(); if (l) dispatch(l); }); };
+    wsock.onclose = () => { setConnected(false); stopPolling(); if (transport==='ws') setTimeout(wsConnect, 2000); };
+    wsock.onerror = () => {};
+  } catch (e) { log('wifi connect failed: '+e.message,'log-err'); }
+}
+
+async function readLoop() {
+  const dec = new TextDecoder();
+  try {
+    reader = port.readable.getReader();
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      rxBuf += dec.decode(value, { stream:true });
+      let nl;
+      while ((nl = rxBuf.indexOf('\n')) >= 0) {
+        const line = rxBuf.slice(0, nl).replace(/\r$/, '').trim();
+        rxBuf = rxBuf.slice(nl + 1);
+        if (line) dispatch(line);
+      }
+    }
+  } catch (e) { if (keepReading) log('read error: '+e.message,'log-err'); }
+  finally { try { reader.releaseLock(); } catch {} }
+}
+function dispatch(line) {
+  const m = line.match(/^(\d+)\s+(OK|ERR)\b(.*)$/);
+  if (m) {
+    const s=+m[1], p=pending.get(s);
+    if (p){ clearTimeout(p.timer); pending.delete(s); p.resolve({ ok:m[2]==='OK', rest:m[3].trim(), line }); }
+    if (!p || !p.quiet) log('< '+line, m[2]==='OK' ? 'log-rx':'log-err');
+    return;
+  }
+  if (/^ESC (OK (SPIN|PONG|STOP|ESTOP)|ST )/.test(line)) return;
+  log('  '+line, line.startsWith('ESC ')?'log-esc':'log-rx');
+  const el=$('log'); if (el.childNodes.length>600) el.innerHTML = el.innerHTML.split('\n').slice(-400).join('\n');
+}
+// Transport-agnostic raw send: WebSocket (device/WiFi) or Web Serial (PC/USB).
+function sendRaw(text) {
+  if (transport === 'ws') {
+    if (!wsock || wsock.readyState !== 1) throw new Error('not connected');
+    wsock.send(text);
+  } else {
+    if (!writer) throw new Error('not connected');
+    writer.write(new TextEncoder().encode(text));
+  }
+}
+function send(cmd, { quiet=false, timeout=1500 } = {}) {
+  return new Promise((resolve, reject) => {
+    const s = ++seq;
+    const timer = setTimeout(() => { pending.delete(s); reject(new Error('timeout: '+cmd)); }, timeout);
+    pending.set(s, { resolve, reject, timer, quiet });
+    try { sendRaw(`${s} ${cmd}\n`); } catch (e) { clearTimeout(timer); pending.delete(s); return reject(e); }
+    if (!quiet) log('> '+s+' '+cmd,'log-tx');
+  });
+}
+let pollTimer=null, polling=false;
+function startPolling(){ stopPolling(); pollTimer=setInterval(poll,350); poll(); }
+function stopPolling(){ if (pollTimer) clearInterval(pollTimer); pollTimer=null; }
+async function poll(){
+  if (polling) return; polling=true;
+  try { const r = await send('STATUS',{quiet:true,timeout:1000}); const f={};
+    r.rest.replace(/(\w+)=(-?\d+)/g,(_,k,v)=>{ f[k]=+v; return ''; }); lastStatus=f; render(f); }
+  catch { /* transient */ }
+  finally { polling=false; }
+}
+
+// ================= render: hero video scene + HUD + panels =================
+// Render segments (seconds) mapped from the machine state. Tuned to the render arc:
+// 0-9 closed · 10-19 opening · 20-33 open/interior · 48-63 rotor/spin · 64-72 closing.
+// Each scene is its own short clip; it plays ONCE and holds its final frame (the <video>
+// has no loop attribute). Clips are chosen so the last frame matches the resulting device
+// state (opening -> ends open, closing -> ends fully closed) and open vs close are clearly
+// different footage. Same relative paths work whether served by the PC or the ESP32.
+const CLIP = { idle:'assets/clips/idle.mp4', opening:'assets/clips/opening.mp4',
+  open:'assets/clips/open.mp4', spin:'assets/clips/spin.mp4', closing:'assets/clips/closing.mp4',
+  fault:'assets/clips/idle.mp4' };
+const CAP = { idle:'Idle', opening:'Opening door', open:'Door open', spin:'Centrifuging', closing:'Closing door', fault:'Fault' };
+const CLS = { idle:'good', opening:'run', open:'good', spin:'run', closing:'run', fault:'fault' };
+function sceneFor(f) {
+  if (!f) return 'idle';
+  const st = f.STATE ?? 0;
+  if (st===8 || st===9) return 'fault';
+  if (SPIN_STATES.has(st)) return 'spin';
+  if (f.DOORMOVE === 1) return f.DOORCMD === 1 ? 'closing' : 'opening';
+  if (ROTATE_STATES.has(st)) return 'open';
+  if (f.DOOR === 1) return 'open';
+  return 'idle';
+}
+// On WiFi, hold the (heavy) render clips until the WebSocket is connected, so a video
+// transfer over the single-threaded device server can't starve the WS handshake. Until
+// then the poster frame shows. On the PC/USB path there's no such contention.
+let heroReady = !servedByDevice;   // only defer the video when the (slow) device serves it
+let curScene=null, sceneLockUntil=0;
+const vid = $('hero');
+function setScene(name, opts={}) {
+  if (!CLIP[name]) return;
+  const now = performance.now();
+  // A forced door clip briefly locks out the auto (STATUS-driven) scene so a short or
+  // instant door move can't cut its clip short. spin/fault always win over the lock.
+  if (!opts.force && now < sceneLockUntil && name!=='spin' && name!=='fault') return;
+  if (name===curScene && !opts.restart) return;
+  curScene = name;
+  document.body.dataset.scene = name;
+  $('scenePill').className = 'scenePill ' + (CLS[name]||'');
+  $('sceneText').textContent = CAP[name];
+  if (heroReady) {               // load + play this scene's clip once; it holds the last frame
+    vid.src = CLIP[name];
+    vid.load();
+    vid.play().catch(()=>{});
+  }
+  if (opts.force) sceneLockUntil = now + 7000;   // keep the forced door clip on screen ~its length
+}
+
+const DOOR_NAMES = { 0:'unknown', 1:'open', 2:'closed', 3:'invalid' };
+function chip(el, text, cls){ el.textContent=text; el.className='statechip '+(cls||''); }
+
+function render(f) {
+  // hero scene
+  setScene(sceneFor(f));
+
+  if (!f) {
+    $('rpmActual').textContent='—'; $('rpmTarget').textContent='—'; $('stateName').textContent='—';
+    $('rpmBar').style.width='0'; $('sceneText').textContent='Offline';
+    $('scenePill').className='scenePill'; $('btnClear').style.display='none';
+    $('metaTube').textContent='Tube —'; $('metaDoor').textContent='Door —'; $('metaLock').textContent='Lock —';
+    chip($('doorChip'),'—'); chip($('tubeChip'),'—'); chip($('runChip'),'—'); chip($('audioChip'),'—');
+    $('indicators').innerHTML=''; drawDoor(null); drawDial(null); updatePower(null);
+    return;
+  }
+  const st = f.STATE ?? 0;
+
+  // ---- hero HUD ----
+  $('rpmActual').textContent = (f.RPM1 ?? 0);
+  $('rpmTarget').textContent = (f.RPM_CMD ?? 0);
+  $('stateName').textContent = STATE_NAMES[st] || ('state '+st);
+  $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/4000)*100,0,100) + '%';
+  $('btnClear').style.display = (f.FAULT ? '' : 'none');
+
+  const locked = (f.LOCKCMD ?? f.LOCK) ? true : false;
+  const tube = f.TUBE ?? 0;
+  $('metaTube').textContent = 'Tube ' + (tube ? tube : '—');
+  $('metaDoor').textContent = 'Door ' + (DOOR_NAMES[f.DOOR] ?? f.DOOR);
+  $('metaLock').textContent = 'Lock ' + (locked ? 'engaged' : 'released');
+
+  // ---- door panel ----
+  const dmoving = f.DOORMOVE === 1;
+  const dtxt = dmoving ? (f.DOORCMD===-1?'opening':f.DOORCMD===1?'closing':'moving') : (DOOR_NAMES[f.DOOR] ?? f.DOOR);
+  chip($('doorChip'), dtxt, dmoving?'run':f.DOOR===2?'good':f.DOOR===3?'bad':'warn');
+  drawDoor(f);
+  const canDoor = STOPPED(st);
+  $('btnDoorOpen').disabled  = !canDoor || f.DOOR===1;
+  $('btnDoorClose').disabled = !canDoor || f.DOOR===2;
+
+  // ---- tube panel ----
+  const rotTgt = f.ROTTGT ?? 0;
+  chip($('tubeChip'), rotTgt ? ('indexing → '+rotTgt) : (tube?('at tube '+tube):'unknown'), rotTgt?'run':tube?'good':'warn');
+  drawDial(f);
+  document.querySelectorAll('.dial .pos').forEach(p => p.style.pointerEvents = STOPPED(st) ? 'auto' : 'none');
+
+  // ---- centrifuge panel ----
+  const running = SPIN_STATES.has(st) || ROTATE_STATES.has(st) || (st>=10 && st<=14);
+  chip($('runChip'), running ? (STATE_NAMES[st]||'run') : (st===1?'ready':st===0?'stand-by':'—'),
+       running?'run':st===1?'good':'');
+  $('btnRun').disabled   = !(st===0 || st===1);
+  $('btnAbort').disabled = !(st===6 || st===7);
+
+  // ---- debug: audio + telemetry ----
+  chip($('audioChip'), f.AUDIO ? 'ready' : 'no module', f.AUDIO?'good':'bad');
+  const ind = [
+    ['State', STATE_NAMES[st]||st, running?'warn':''],
+    ['Fault', FAULT_NAMES[f.FAULT] ?? f.FAULT, f.FAULT?'bad':'good'],
+    ['RPM cmd', f.RPM_CMD ?? '–', ''], ['RPM meas', f.RPM1 ?? '–', ''],
+    ['Door', DOOR_NAMES[f.DOOR] ?? f.DOOR, f.DOOR===2?'good':f.DOOR===3?'bad':'warn'],
+    ['Door cmd', f.DOORCMD, ''], ['Door PWM', f.DOORPWM, ''],
+    ['Hall open', f.HOPEN, f.HOPEN===0?'good':''], ['Hall closed', f.HCLOSED, f.HCLOSED===0?'good':''],
+    ['Lock cmd', locked?'locked':'released', locked?'good':'warn'],
+    ['Tube', tube||'?', tube?'good':''], ['Home', f.HOMED?'set':'unset', f.HOMED?'good':'bad'],
+    ['Motor EN', f.ENABLE?'on':'off', f.ENABLE?'good':''], ['Power', f.POWER?'on':'off', f.POWER?'good':''],
+    ['Fan', f.FAN?'on':'off', f.FAN?'good':''], ['Audio', f.AUDIO?'ok':'—', f.AUDIO?'good':'bad'],
+  ];
+  $('indicators').innerHTML = ind.map(([k,v,c]) =>
+    `<div class="ind"><div class="k">${k}</div><div class="v ${c||''}">${v ?? '–'}</div></div>`).join('');
+
+  updatePower(f);
+}
+
+// ---- door glyph (simple animated box + lid) ----
+function drawDoor(f) {
+  const g = $('doorGlyph');
+  const open = f && (f.DOOR===1 || (f.DOORMOVE===1 && f.DOORCMD===-1));
+  const col = f && f.DOOR===2 ? '#37c96f' : open ? '#5b93ff' : '#68727f';
+  g.innerHTML = `
+    <rect x="12" y="24" width="40" height="32" rx="4" fill="#0e131b" stroke="${col}" stroke-width="2.5"/>
+    <rect x="20" y="34" width="24" height="18" rx="2" fill="#141b25" stroke="#ffffff1f"/>
+    <g transform="rotate(${open?-58:0} 12 24)" style="transition:.4s">
+      <rect x="12" y="16" width="40" height="10" rx="3" fill="${col}" opacity=".9"/>
+    </g>`;
+}
+
+// ---- tube dial ----
+const DIAL_POS = [ {n:1,x:100,y:44}, {n:2,x:156,y:100}, {n:3,x:100,y:156}, {n:4,x:44,y:100} ];
+(function buildDial(){
+  const g = $('dialPos');
+  g.innerHTML = DIAL_POS.map(p =>
+    `<circle class="pos" data-tube="${p.n}" cx="${p.x}" cy="${p.y}" r="17"></circle>
+     <text class="plabel" data-tube="${p.n}" x="${p.x}" y="${p.y}">${p.n}</text>`).join('');
+  g.querySelectorAll('.pos').forEach(c => c.onclick = () => doRotate(+c.dataset.tube));
+})();
+function drawDial(f) {
+  const tube = f ? (f.TUBE ?? 0) : 0;
+  const rotTgt = f ? (f.ROTTGT ?? 0) : 0;
+  $('dial').classList.toggle('indexing', !!rotTgt);
+  $('dialCenter').textContent = rotTgt ? rotTgt : (tube || '—');
+  document.querySelectorAll('.dial .pos').forEach(p => {
+    const active = (+p.dataset.tube === (rotTgt || tube));
+    p.classList.toggle('active', active);
+  });
+  document.querySelectorAll('.dial .plabel').forEach(t =>
+    t.classList.toggle('active', (+t.dataset.tube === (rotTgt || tube))));
+}
+
+// ================= actions =================
+async function cmd(c, label){ try { const r=await send(c); if(!r.ok) log((label||c)+' rejected: '+r.rest,'log-err'); return r; }
+  catch(e){ log(e.message,'log-err'); } }
+async function doPower(){ const f=lastStatus||{}; await cmd(f.POWER ? 'POWER_OFF' : 'POWER_ON','power'); }
+function updatePower(f){ const on=!!(f&&f.POWER);
+  const b=$('btnPower'); b.textContent = on ? '⏻ Power off' : '⏻ Power'; b.classList.toggle('on', on);
+  // Gate the entire console behind Power on: until powered, only the gate (built-by logo +
+  // Power on button) shows, on a white background, with the animation still playing.
+  // SAFETY: also show the full console (incl. E-STOP) whenever the machine is in ANY active
+  // or fault state (STATE > SAFE_IDLE), so powering off mid-run can never hide E-STOP.
+  const st = f ? (f.STATE ?? 0) : 0;
+  document.body.classList.toggle('powered', on || st > 1); }
+
+async function doRun(){
+  const f = lastStatus || {}; const st = f.STATE ?? 0;
+  const target = clamp(+$('inRpm').value||0, 0, 4000);
+  const hold = Math.max(0, +$('inTime').value||0) * 1000;
+  const ramp = Math.max(1, +$('inRamp').value||1) * 1000;
+  try {
+    if (st === 0) { const ir = await send('INIT'); if(!ir.ok){ log('arm failed: '+ir.rest,'log-err'); return; } await delay(200); }
+    const r = await send(`RUN LIFT=${target} FINAL=${target} SEAT=500 HOLD=${hold} RAMPUP=${ramp} RAMPDOWN=${ramp}`);
+    if (!r.ok) log('run rejected: '+r.rest,'log-err');
+  } catch(e){ log(e.message,'log-err'); }
+}
+async function doRotate(t){ await cmd('ROTATE '+t, 'rotate'); }
+
+// audio test grid (1..10)
+const AUDIO_LABELS = ['at speed','door closing','door opening','locking','power on','run complete',
+  'tube 4','tube 1','tube 3','tube 2'];
+(function buildAudio(){
+  $('audioGrid').innerHTML = AUDIO_LABELS.map((l,i) =>
+    `<button class="ctl" data-audio="${i+1}" title="${l}">${i+1}<br><span style="font:500 9px Inter;color:var(--txt3)">${l}</span></button>`).join('');
+  $('audioGrid').querySelectorAll('button').forEach(b => b.onclick = () => cmd('AUDIO '+b.dataset.audio,'audio'));
+})();
+$('volSlider').oninput = e => { $('volVal').textContent = e.target.value; };
+$('volSlider').onchange = e => cmd('AUDIO_VOL '+e.target.value,'volume');
+
+// ================= wire up =================
+$('btnConnect').onclick = () => (port ? disconnect() : connect());
+$('btnPower').onclick = doPower;
+$('btnGatePower').onclick = doPower;
+$('btnGateConnect').onclick = () => (port ? disconnect() : connect());
+$('btnEstop').onclick = () => cmd('HARDSTOP','estop');
+$('btnClear').onclick = () => cmd('CLEAR_FAULT','clear');
+$('btnDoorOpen').onclick = () => { setScene('opening',{force:true,restart:true}); cmd('DOOR_OPEN','door open'); };
+$('btnDoorClose').onclick = () => { setScene('closing',{force:true,restart:true}); cmd('DOOR_CLOSE','door close'); };
+$('btnRun').onclick = doRun;
+$('btnAbort').onclick = () => cmd('ABORT','abort');
+$('btnInit').onclick = () => cmd('INIT','init');
+$('btnHome').onclick = () => cmd('HOME','home');
+$('btnDoorStop').onclick = () => cmd('DOOR_STOP','door stop');
+$('btnDbgLock').onclick = () => cmd('LOCK','lock');
+$('btnDbgUnlock').onclick = () => cmd('UNLOCK','unlock');
+$('btnRaw').onclick = async () => { const c=$('rawCmd').value.trim(); if(c){ await cmd(c); $('rawCmd').value=''; } };
+$('rawCmd').onkeydown = e => { if (e.key==='Enter') $('btnRaw').click(); };
+$('btnClearLog').onclick = () => $('log').innerHTML='';
+
+// Boot: over WiFi (served by the device) auto-connect and hide the manual Connect button;
+// over USB keep the Web Serial Connect flow.
+if (transport === 'ws') {
+  $('btnConnect').style.display = 'none';
+  setConnected(false);
+  wsConnect();
+} else {
+  setConnected(false);
+}
+</script>
+</body>
+</html>

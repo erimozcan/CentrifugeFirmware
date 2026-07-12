@@ -27,7 +27,7 @@ class StateMachine {
   void updateFanControl(SystemContext &ctx);
   bool isRunInterlockSafe(const SystemContext &ctx) const;
   void applyPendingCommand(SystemContext &ctx, const PendingCommand &pendingLocal, uint32_t nowMs);
-  void applyStateProgression(SystemContext &ctx, uint32_t nowMs);
+  void applyStateProgression(SystemContext &ctx, MotorInterface &motor, uint32_t nowMs);
   void updateFixedPointRamp(SystemContext &ctx);
   void transitionTo(SystemContext &ctx, SystemState next, uint32_t nowMs);
   void enterHardStop(SystemContext &ctx, FaultCode reason, uint32_t nowMs);

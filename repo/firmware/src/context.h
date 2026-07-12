@@ -16,7 +16,24 @@ enum SystemState : uint8_t {
   STATE_SPIN_HOLD,
   STATE_STOPPING,
   STATE_HARD_STOP,
-  STATE_FAULT_LATCHED
+  STATE_FAULT_LATCHED,
+  // Automated full-cycle run choreography (appended so existing numeric state values,
+  // used by the UI/protocol, do not shift). The gantry lock indexes the rotor at a tube
+  // position for pipetting -> LOCKED at rest, RELEASED only to spin. So: close the door,
+  // RELEASE the lock, spin; after ramp-down settle at rest, RE-ENGAGE the lock, open door.
+  STATE_RUN_CLOSING = 10,
+  STATE_RUN_RELEASE = 11,   // door closed -> release the gantry lock so the rotor can spin
+  STATE_RUN_SETTLE = 12,    // post-spin: let the rotor coast fully to rest (still released)
+  STATE_RUN_ENGAGE = 13,    // rotor stopped -> re-engage the gantry lock
+  STATE_RUN_OPENING = 14,
+  // Index the gantry to a tube position: release the lock, ESC angle-moves to the tube,
+  // re-engage the lock. Used to present the next tube to the pipette (door open).
+  STATE_ROTATE_RELEASE = 15,
+  STATE_ROTATE_MOVING = 16,
+  STATE_ROTATE_ENGAGE = 17,
+  // Post-spin (in the run cycle): index the gantry to the nearest detent so the lock can
+  // actually mesh -- a spin stops the rotor at a random angle, not a lockable position.
+  STATE_RUN_INDEX = 18
 };
 
 enum FaultCode : uint8_t {
@@ -29,7 +46,8 @@ enum FaultCode : uint8_t {
   FAULT_DOOR_OPEN_DURING_SPIN = 6,
   FAULT_DOOR_MOVE_TIMEOUT = 7,
   FAULT_OVER_TEMP = 8,
-  FAULT_INTERLOCK_NOT_SAFE = 9
+  FAULT_INTERLOCK_NOT_SAFE = 9,
+  FAULT_ROTATE_TIMEOUT = 10
 };
 
 enum DoorState : uint8_t {
@@ -43,6 +61,11 @@ enum DoorMotorCommand : int8_t {
   DOOR_MOTOR_STOP = 0,
   DOOR_MOTOR_OPEN = -1,
   DOOR_MOTOR_CLOSE = 1
+};
+
+enum LedMode : uint8_t {
+  LED_MODE_SOLID = 0,    // show ledR/ledG/ledB (all-zero = off)
+  LED_MODE_RAINBOW = 1   // animated hue sweep
 };
 
 struct RunProfile {
@@ -67,6 +90,27 @@ struct PendingCommand {
   bool hasUnlock;
   bool hasDoorOpen;
   bool hasDoorClose;
+  bool hasDoorStop;
+  bool hasDoorSpeed;      // set the door slow-run PWM duty (0-255)
+  uint8_t doorSpeed;
+
+  bool hasLed;
+  uint8_t ledR;
+  uint8_t ledG;
+  uint8_t ledB;
+  uint8_t ledMode;
+
+  bool hasPowerOn;
+  bool hasPowerOff;
+
+  bool hasRotate;         // index the gantry to a tube position (1..TUBE_COUNT)
+  uint8_t rotateTube;
+  bool hasHome;           // capture the current shaft angle as the detent reference
+
+  bool hasAudioPlay;      // manual/bench: play a specific clip by file number
+  uint8_t audioTrack;
+  bool hasAudioVol;       // set audio volume (0-30)
+  uint8_t audioVol;
 };
 
 struct SensorData {
@@ -99,25 +143,77 @@ struct SystemContext {
   bool lockConfirmed;
   bool lockAwaitingSensor;
   uint32_t lockCommandStartMs;
+  bool lockManualOverride;   // debug: manual LOCK/UNLOCK overrides the auto policy (idle only)
+  bool lockManualEngaged;
   DoorState doorState;
   bool doorOpenSensorActive;
   bool doorClosedSensorActive;
+  uint8_t doorOpenHallRaw;     // raw pin level (1=HIGH); surfaced for polarity bring-up
+  uint8_t doorClosedHallRaw;
   DoorMotorCommand doorMotorCommand;
   bool doorMoveActive;
   uint32_t doorMoveDeadlineMs;
+  uint8_t doorPwmDuty;     // live slow-run PWM duty (0-255), adjustable from the UI
+
+  uint8_t rotateTube;      // tube the in-progress rotate is heading to (1..TUBE_COUNT)
+  uint8_t currentTube;     // 0 = unknown (e.g. after a spin), else the last indexed tube
+  uint32_t rotateDeadlineMs;
+  bool homed;              // detent reference captured (mirror of MotorInterface::homeSet())
   uint16_t ntcAdc;
   bool fanEnabled;
   bool overTempCritical;
+  bool devicePowered;   // UI "Turn on": fan runs + LEDs rainbow while true
+  bool needEscTuning;   // one-shot: push tuned ESC gains on entry to PRE_RUN_VERIFY
 
   bool motorEnableOutput;
+
+  uint8_t ledR;
+  uint8_t ledG;
+  uint8_t ledB;
+  uint8_t ledMode;
+
+  // Audio: a mailbox for manual play/volume requests (set by the command handler,
+  // consumed + cleared by the AudioController in loop()). Automatic event cues are
+  // observed by the AudioController directly from the state/door/lock fields above.
+  uint8_t audioManualReq;   // 0 = none, else a file number (>=1) to play now
+  bool audioVolPending;     // a volume change is queued
+  uint8_t audioVol;         // requested volume (0-30)
+  bool audioReady;          // mirror of AudioController readiness (module initialized)
 };
 
 inline void clearPendingCommand(PendingCommand &pending) {
   memset(&pending, 0, sizeof(PendingCommand));
 }
 
+// States where the rotor may be turning -> the door-closed + over-temp interlocks apply.
+// Covers every phase from lift through ramp-down (SEAT_HOLD and STOPPING spin too).
 inline bool isMotorEnabledState(SystemState state) {
-  return state == STATE_LIFT_RAMP || state == STATE_MAIN_RAMP || state == STATE_SPIN_HOLD;
+  return state == STATE_LIFT_RAMP || state == STATE_SEAT_HOLD ||
+         state == STATE_MAIN_RAMP || state == STATE_SPIN_HOLD ||
+         state == STATE_STOPPING;
+}
+
+// Gantry lock policy (state-derived, authoritative): the lock indexes the rotor at a
+// discrete tube position so tubes stay put for pipetting. It is ENGAGED (locked) whenever
+// the rotor is at rest, and RELEASED (unlocked) ONLY across the spin window -- from the
+// pre-spin release (door already closed) through ramp-down and the coast-to-rest settle.
+inline bool gantryLockEngaged(SystemState state) {
+  switch (state) {
+    case STATE_RUN_RELEASE:
+    case STATE_PRE_RUN_VERIFY:
+    case STATE_LIFT_RAMP:
+    case STATE_SEAT_HOLD:
+    case STATE_MAIN_RAMP:
+    case STATE_SPIN_HOLD:
+    case STATE_STOPPING:
+    case STATE_RUN_SETTLE:
+    case STATE_ROTATE_RELEASE:   // releasing so the gantry can be indexed
+    case STATE_ROTATE_MOVING:    // motor is moving the gantry to the next tube
+    case STATE_RUN_INDEX:        // post-spin: crawling to the nearest detent before re-lock
+      return false;   // released (spinning / about to spin / coasting / indexing)
+    default:
+      return true;    // locked (idle, powered on/off, closing, engaging, opening, fault)
+  }
 }
 
 #endif
