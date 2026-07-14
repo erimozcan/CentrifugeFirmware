@@ -58,7 +58,7 @@
 // (0.6 V align / 1.5 A) could not seat or spin the loaded shaft. Live: `k` / `c`.
 #define ALIGN_VOLTAGE      1.40f    // FOC alignment push (~4.4 A; needs PSU Ilim ~5 A)
 #define OPENLOOP_VOLTAGE   0.30f    // stage-2/3 open-loop voltage cap (voltage torque mode)
-#define BRINGUP_CURRENT    4.5f     // closed-loop CURRENT limit (foc_current) -- enough to
+#define BRINGUP_CURRENT    5.0f     // closed-loop CURRENT limit (foc_current) -- enough to
                                     // break the loaded shaft loose; the real safety cap. Live: `c`.
 #define MOTOR_VOLT_LIMIT   5.0f     // closed-loop voltage ceiling: high enough for 4000 RPM
                                     // back-EMF (~3.6 V). Safe because foc_current bounds the
@@ -94,7 +94,7 @@
 #define SENSORLESS_LOCK_ERR_RAD     (15.0f * _PI / 180.0f)
 #define SENSORLESS_LOCK_RPM_ERR     300.0f
 #define SENSORLESS_MIN_BEMF_V       1.0f
-#define SENSORLESS_TRIAL_CURRENT_A  3.0f
+#define SENSORLESS_TRIAL_CURRENT_A  5.0f
 #define MOTOR_PHASE_RESISTANCE_OHM  0.32f
 #define MOTOR_PHASE_INDUCTANCE_H    0.000010f
 
