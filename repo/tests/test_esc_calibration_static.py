@@ -79,7 +79,8 @@ def test_master_forwards_service_commands_only_as_explicit_safe_verbs():
     ]:
         assert esc_line in src
 
-    assert "isEscServiceState" in src
+    assert "isEscServiceStartState" in src
+    assert "isEscServiceStopState" in src
 
 
 def test_master_uses_esc_owned_profiles_instead_of_raw_pid_push():
@@ -106,3 +107,48 @@ def test_ui_exposes_esc_calibration_service_controls():
             "escPhaseErr",
         ]:
             assert text in src
+
+
+def test_master_allows_cal_stop_with_active_calibration_gate():
+    src = read(MASTER_COMMANDS)
+    assert "isEscCalibrationActive" in src
+    assert "isEscServiceStartState" in src
+    assert "isEscServiceStopState" in src
+
+    cal_start = src[src.index('strcmp(cmdToken, "CAL_START")'):src.index('strcmp(cmdToken, "CAL_STOP")')]
+    cal_stop = src[src.index('strcmp(cmdToken, "CAL_STOP")'):src.index('strcmp(cmdToken, "CAL_STATUS")')]
+
+    assert "isEscServiceStartState(ctx)" in cal_start
+    assert "isEscServiceStopState(ctx)" in cal_stop
+    assert "isEscServiceState(ctx)" not in cal_stop
+
+
+def test_master_blocks_normal_motion_during_esc_calibration():
+    src = read(MASTER_COMMANDS)
+    assert "isMachineMotionCommandBlocked(ctx)" in src
+
+    for cmd in [
+        '"RUN"',
+        '"LOCK"',
+        '"UNLOCK"',
+        '"DOOR_OPEN"',
+        '"DOOR_CLOSE"',
+        '"ROTATE"',
+    ]:
+        block_start = src.index(f"strcmp(cmdToken, {cmd})")
+        block_end = src.find("return;", block_start)
+        block = src[block_start:block_end]
+        assert "isMachineMotionCommandBlocked(ctx)" in block
+
+
+def test_esc_stop_and_estop_abort_active_calibration_state():
+    src = read(ESC_MAIN)
+    assert "abortCalibration" in src
+
+    link_stop = src[src.index("static void linkStop()"):src.index("// Closed-loop angle move")]
+    link_estop = src[src.index("static void linkEstop()"):src.index("static void linkPing()")]
+
+    assert "abortCalibration" in link_stop
+    assert "abortCalibration" in link_estop
+    assert "calibrationRunning()" in link_stop
+    assert "calibrationRunning()" in link_estop

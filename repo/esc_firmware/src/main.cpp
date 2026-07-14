@@ -286,6 +286,16 @@ static bool calibrationMotionActive() {
   return calibrationRunning();
 }
 
+static void abortCalibration(const char *reason, CalibrationState finalState) {
+  ramp_accel = cal_saved_ramp_accel;
+  cal_target_rpm = 0.0f;
+  cal_step = 0;
+  strncpy(cal_error, reason, sizeof(cal_error) - 1U);
+  cal_error[sizeof(cal_error) - 1U] = '\0';
+  cal_state = finalState;
+  cal_state_ms = millis();
+}
+
 static void applyPidProfile(const PidProfile &profile) {
   active_pid_profile = &profile;
   motor.PID_velocity.P = profile.velocityP;
@@ -544,6 +554,12 @@ static void linkSpin(float rpm) {
 
 static void linkStop() {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  if (calibrationRunning() || cal_state == CAL_DONE) {
+    abortCalibration("stop", CAL_IDLE);
+    disarm("cal stop");
+    Serial.println("OK STOP");
+    return;
+  }
   if (index_mode) {
     disarm("index stop");              // leaves angle-hold; lock now holds the gantry
     Serial.println("OK STOP");
@@ -582,6 +598,9 @@ static void linkIndex(int tube) {
 
 static void linkEstop() {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  if (calibrationRunning() || cal_state == CAL_DONE) {
+    abortCalibration("estop", CAL_FAILED);
+  }
   stop_then_disarm = false;
   disarm("ESTOP");                     // immediate torque cut
   Serial.println("OK ESTOP");
@@ -689,12 +708,7 @@ static void startCalibration() {
 
 static void stopCalibration() {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
-  ramp_accel = cal_saved_ramp_accel;
-  cal_state = CAL_IDLE;
-  cal_target_rpm = 0.0f;
-  cal_step = 0;
-  strncpy(cal_error, "none", sizeof(cal_error) - 1U);
-  cal_error[sizeof(cal_error) - 1U] = '\0';
+  abortCalibration("none", CAL_IDLE);
   disarm("cal stop");
   Serial.println("OK CAL STOP");
 }

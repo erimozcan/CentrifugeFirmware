@@ -59,10 +59,35 @@ bool isDoorControlState(SystemState state) {
   return state == STATE_BOOT || state == STATE_SAFE_IDLE;
 }
 
-bool isEscServiceState(const SystemContext &ctx) {
+int32_t absInt32(int32_t value) {
+  return value < 0 ? -value : value;
+}
+
+bool isEscCalibrationActive(const SystemContext &ctx) {
+  return strcmp(ctx.escCalState, "idle") != 0 &&
+         strcmp(ctx.escCalState, "done") != 0 &&
+         strcmp(ctx.escCalState, "failed") != 0;
+}
+
+bool isMeasuredStoppedForService(const SystemContext &ctx) {
+  return absInt32(ctx.rpmCmd) < SAFE_UNLOCK_RPM &&
+         absInt32(ctx.rpm1) < SAFE_UNLOCK_RPM;
+}
+
+bool isEscServiceStartState(const SystemContext &ctx) {
   return (ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE) &&
-         ctx.rpmCmd < SAFE_UNLOCK_RPM &&
-         ctx.rpm1 < SAFE_UNLOCK_RPM;
+         isMeasuredStoppedForService(ctx) &&
+         !isEscCalibrationActive(ctx);
+}
+
+bool isEscServiceStopState(const SystemContext &ctx) {
+  return isEscCalibrationActive(ctx) ||
+         ((ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE) &&
+          isMeasuredStoppedForService(ctx));
+}
+
+bool isMachineMotionCommandBlocked(const SystemContext &ctx) {
+  return isEscCalibrationActive(ctx) || !isMeasuredStoppedForService(ctx);
 }
 
 void forwardEscServiceCommand(int32_t seq, const char *line) {
@@ -135,7 +160,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "CAL_START") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStartState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -144,7 +169,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "CAL_STOP") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStopState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -153,7 +178,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "CAL_STATUS") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStopState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -162,7 +187,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "CAL_APPLY") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStartState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -171,7 +196,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "PROFILE_SPIN") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStartState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -180,7 +205,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "PROFILE_CRAWL") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStartState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -189,7 +214,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "TUNE_STATUS") == 0 || strcmp(cmdToken, "TUNE?") == 0) {
-    if (!isEscServiceState(ctx)) {
+    if (!isEscServiceStopState(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -223,7 +248,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "RUN") == 0) {
-    if (ctx.state != STATE_SAFE_IDLE) {
+    if (ctx.state != STATE_SAFE_IDLE || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -269,7 +294,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "LOCK") == 0) {
-    if (!isLockControlState(ctx.state)) {
+    if (!isLockControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -280,7 +305,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "UNLOCK") == 0) {
-    if (!isLockControlState(ctx.state) || ctx.rpmCmd >= SAFE_UNLOCK_RPM) {
+    if (!isLockControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -291,7 +316,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "DOOR_OPEN") == 0) {
-    if (!isDoorControlState(ctx.state) || ctx.rpmCmd >= SAFE_UNLOCK_RPM) {
+    if (!isDoorControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -301,7 +326,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   }
 
   if (strcmp(cmdToken, "DOOR_CLOSE") == 0) {
-    if (!isDoorControlState(ctx.state) || ctx.rpmCmd >= SAFE_UNLOCK_RPM) {
+    if (!isDoorControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
@@ -337,7 +362,7 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
   // ROTATE <1-TUBE_COUNT>: index the gantry to a tube position. Allowed while stopped
   // (BOOT or SAFE_IDLE), like the door/lock -- no Init needed.
   if (strcmp(cmdToken, "ROTATE") == 0) {
-    if (!isDoorControlState(ctx.state)) {
+    if (!isDoorControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");
       return;
     }
