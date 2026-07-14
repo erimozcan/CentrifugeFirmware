@@ -24,7 +24,7 @@ class StateMachine {
  private:
   void updateInterlockState(SystemContext &ctx, const SensorData &sensorSnapshot);
   void updateDoorMotorControl(SystemContext &ctx, uint32_t nowMs);
-  void updateFanControl(SystemContext &ctx);
+  void updateFanControl(SystemContext &ctx, uint32_t nowMs);
   bool isRunInterlockSafe(const SystemContext &ctx) const;
   void applyPendingCommand(SystemContext &ctx, const PendingCommand &pendingLocal, uint32_t nowMs);
   void applyStateProgression(SystemContext &ctx, MotorInterface &motor, uint32_t nowMs);
@@ -32,6 +32,9 @@ class StateMachine {
   void transitionTo(SystemContext &ctx, SystemState next, uint32_t nowMs);
   void enterHardStop(SystemContext &ctx, FaultCode reason, uint32_t nowMs);
   void setRampTarget(SystemContext &ctx, int32_t rpmTarget, uint32_t durationMs);
+
+  bool fanDemandPreviously_ = false;
+  uint32_t fanCooldownUntilMs_ = 0U;
 };
 
 #endif

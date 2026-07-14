@@ -23,6 +23,15 @@ void MotorInterface::begin() {
   rxLen_ = 0U;
   measuredRpm_ = 0;
   lastRxMs_ = 0U;
+  strncpy(escCalState_, "idle", sizeof(escCalState_) - 1U);
+  escCalState_[sizeof(escCalState_) - 1U] = '\0';
+  escCalStep_ = 0;
+  escCalTargetRpm_ = 0;
+  escCurrentCentiamps_ = 0;
+  escObserverRpm_ = 0;
+  escObserverLock_ = 0U;
+  escPhaseErrDeg10_ = 0;
+  escLoopHz_ = 0U;
   indexActive_ = false;
   indexArrived_ = false;
   lastIndexTube_ = -1;
@@ -137,6 +146,26 @@ bool MotorInterface::indexArrived() const {
 namespace {
 float mod1(float x) { x -= floorf(x); return (x < 0.0f) ? x + 1.0f : x; }          // -> [0,1)
 float circDist(float a, float b) { float d = fabsf(mod1(a) - mod1(b)); return (d > 0.5f) ? 1.0f - d : d; }
+
+const char *findValue(const char *line, const char *key) {
+  const char *p = strstr(line, key);
+  if (p == nullptr) {
+    return nullptr;
+  }
+  return p + strlen(key);
+}
+
+void copyToken(char *out, size_t outLen, const char *value) {
+  if (outLen == 0U || value == nullptr) {
+    return;
+  }
+  size_t i = 0U;
+  while (value[i] != '\0' && value[i] != ' ' && i < outLen - 1U) {
+    out[i] = value[i];
+    i++;
+  }
+  out[i] = '\0';
+}
 }  // namespace
 
 void MotorInterface::requestHome() {
@@ -178,8 +207,7 @@ uint8_t MotorInterface::arrivedTube() const {
 // barely command current at a crawl -> stalls on the assembly's stiction). Restored by
 // applyEscTuning() when the move ends.
 void MotorInterface::applyRotateTuning() {
-  Serial1.print("p ");
-  Serial1.println(ROTATE_VEL_P, 3);
+  txLiteral("PROFILE CRAWL");
 }
 
 void MotorInterface::startRotateToTube(uint8_t tube) {
@@ -285,16 +313,9 @@ void MotorInterface::txIndex(uint8_t escTube) {
 }
 
 void MotorInterface::applyEscTuning() {
-  // INTERIM FIX (2026-07-02, no ESC reflash available -- ST-LINK broken off): the
-  // ESC's power-on default closed-loop gains oscillate at speed with the current
-  // load. Push the tuned-softer gains via the ESC's bench-command parser. Sent at
-  // RUN start so it survives an ESC power-cycle. The ESC source already has these as
-  // its defaults; once it's reflashed via external SWD this push becomes redundant.
-  Serial1.println("p 0.05");   // velocity PID P
-  Serial1.println("i 0.1");    // velocity PID I
-  Serial1.println("f 0.15");   // velocity LPF Tf
-  Serial1.println("q 0.3");    // current PID P
-  Serial1.println("j 20");     // current PID I
+  // The ESC now owns named PID/current profiles. The master only requests the mode
+  // it needs instead of pushing raw bench parser gains.
+  txLiteral("PROFILE SPIN");
 }
 
 void MotorInterface::txSpin(int32_t rpm) {
@@ -375,6 +396,39 @@ void MotorInterface::parseEscLine(const char *line) {
   measuredRpm_ = static_cast<int32_t>(atol(p + 4));
   lastRxMs_ = millis();
 
+  const char *cal = findValue(line, "cal=");
+  if (cal != nullptr) {
+    copyToken(escCalState_, sizeof(escCalState_), cal);
+  }
+  const char *calStep = findValue(line, "cal_step=");
+  if (calStep != nullptr) {
+    escCalStep_ = static_cast<int32_t>(atol(calStep));
+  }
+  const char *calTarget = findValue(line, "cal_target=");
+  if (calTarget != nullptr) {
+    escCalTargetRpm_ = static_cast<int32_t>(atol(calTarget));
+  }
+  const char *cur = findValue(line, "cur=");
+  if (cur != nullptr) {
+    escCurrentCentiamps_ = static_cast<int32_t>(atof(cur) * 100.0f);
+  }
+  const char *obsRpm = findValue(line, "obs_rpm=");
+  if (obsRpm != nullptr) {
+    escObserverRpm_ = static_cast<int32_t>(atol(obsRpm));
+  }
+  const char *obsLock = findValue(line, "obs_lock=");
+  if (obsLock != nullptr) {
+    escObserverLock_ = static_cast<uint8_t>(atol(obsLock) != 0 ? 1U : 0U);
+  }
+  const char *phaseErr = findValue(line, "phase_err=");
+  if (phaseErr != nullptr) {
+    escPhaseErrDeg10_ = static_cast<int32_t>(atof(phaseErr) * 10.0f);
+  }
+  const char *hz = findValue(line, "hz=");
+  if (hz != nullptr) {
+    escLoopHz_ = static_cast<uint32_t>(atol(hz));
+  }
+
   // Index arrival: the ESC reports state=indexed once it has reached + is holding the tube.
   if (indexActive_) {
     indexArrived_ = (strstr(line, "state=indexed") != nullptr);
@@ -383,6 +437,10 @@ void MotorInterface::parseEscLine(const char *line) {
 
 int32_t MotorInterface::lastMeasuredRpm() const {
   return measuredRpm_;
+}
+
+void MotorInterface::copyEscCalState(char *out, size_t maxLen) const {
+  copyToken(out, maxLen, escCalState_);
 }
 
 size_t MotorInterface::writeInt32(char *out, size_t maxLen, int32_t value) {

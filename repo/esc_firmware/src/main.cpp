@@ -26,12 +26,17 @@
 #include <SimpleFOC.h>
 #include <stdlib.h>            // atof
 #include <string.h>            // strcmp
+#include "sensorless_observer.h"
 // Quadrature is decoded by TIM4 in silicon -> zero CPU load at any RPM (an
 // interrupt-based Encoder would saturate the core past ~4-5k RPM at 4000 CPR).
 // We program TIM4 directly (below) instead of the SimpleFOCDrivers STM32HWEncoder,
 // whose init() silently failed on this board/core combo.
 
 // ----------------------------- tunables ------------------------------------
+#ifndef HIGH_SPEED_SENSORLESS
+#define HIGH_SPEED_SENSORLESS 0
+#endif
+
 #define POLE_PAIRS         7        // GT2215/10: 14 magnets / 2
 #define SUPPLY_VOLTAGE     12.0f    // bench PSU (3S equivalent)
 
@@ -59,28 +64,39 @@
                                     // back-EMF (~3.6 V). Safe because foc_current bounds the
                                     // current; voltage just follows what BEMF needs. (<= VBUS/2)
 
-// ===== Dual-mode speed profile: closed-loop <-> open-loop ===================
-// Closed-loop FOC (encoder + current sense) runs 0..CROSSOVER_RPM. Above that,
-// the encoder-in-loop / low-side current sense run out of headroom, so we hand
-// off to OPEN-LOOP: commutate at the commanded speed with a scheduled voltage,
-// NO feedback, up to MAX_SPIN_RPM. On the way down we hand BACK to closed-loop at
-// the crossover for a controlled decel. The Nano just commands a target RPM
-// (SPIN <rpm>); the ESC does all the mode switching internally.
+// ===== High-speed profile: encoder FOC <-> sensorless PLL ====================
+// Closed-loop FOC (AS5047P encoder + current sense) runs 0..CROSSOVER_RPM. With
+// HIGH_SPEED_SENSORLESS=1, the observer shadows encoder FOC near the crossover,
+// then supplies the high-speed electrical angle after it proves lock. Default
+// builds keep the production 4000 RPM ceiling and never enter high-speed mode.
 //
 // !!! REACHABLE TOP SPEED IS BOUNDED BY THE SUPPLY !!! back-EMF ~ rpm/KV, and the
 // phases can only be driven to ~VBUS/2. At 12 V that caps ~6k RPM; 10k needs a 6S
 // (~24 V) pack -> set SUPPLY_VOLTAGE=24 and reflash. Everything below is relative
 // to SUPPLY_VOLTAGE so it scales automatically.
 //
-// !!! UNTUNED ABOVE THE CROSSOVER !!! the open-loop regime + the closed<->open
-// handoff have NOT been validated on hardware (the 12 V bench can't reach it).
+// !!! UNTUNED ABOVE THE CROSSOVER !!! the sensorless observer + handoff have NOT
+// been validated on hardware. Validate incrementally with containment/current
+// limit before real use.
 // Validate incrementally on the final supply, with containment, before real use.
 #define MOTOR_KV           1100.0f  // GT2215/10: 1100 RPM per volt of back-EMF
 #define CROSSOVER_RPM      4000.0f  // closed-loop below, open-loop above
-#define CROSSOVER_HYST_RPM  150.0f  // hysteresis so it doesn't chatter at the boundary
+#define CROSSOVER_HYST_RPM  300.0f  // hysteresis so it doesn't chatter at the boundary
+#if HIGH_SPEED_SENSORLESS
 #define MAX_SPIN_RPM      10000.0f  // top commandable target (supply-bounded in reality)
+#else
+#define MAX_SPIN_RPM      CROSSOVER_RPM
+#endif
 #define OL_BEMF_MARGIN      0.8f    // open-loop drives back-EMF + this margin (keeps current low)
 #define OL_VOLT_CAP        VBUS_HALF // open-loop voltage ceiling (== driver limit; raise supply for more)
+#define SENSORLESS_SHADOW_RPM       (CROSSOVER_RPM - 500.0f)
+#define SENSORLESS_LOCK_DWELL_MS    300.0f
+#define SENSORLESS_LOCK_ERR_RAD     (15.0f * _PI / 180.0f)
+#define SENSORLESS_LOCK_RPM_ERR     300.0f
+#define SENSORLESS_MIN_BEMF_V       1.0f
+#define SENSORLESS_TRIAL_CURRENT_A  3.0f
+#define MOTOR_PHASE_RESISTANCE_OHM  0.32f
+#define MOTOR_PHASE_INDUCTANCE_H    0.000010f
 
 // ===== Gantry indexing (tube positions) =====================================
 // The gantry is DIRECT-driven (1:1), so 90 deg of the motor shaft = one tube position.
@@ -149,12 +165,65 @@ LowsideCurrentSense currentSense =
 
 // ----- stage / run state ---------------------------------------------------
 enum Stage { IDLE = 0, ENCODER = 1, OPENLOOP = 2, CURRENT = 3, CLOSEDLOOP = 4 };
+enum SpinControlMode { ENCODER_FOC = 0, OBSERVER_SHADOW = 1, SENSORLESS_PLL = 2, FAULT_RAMPDOWN = 3 };
 static Stage stage = IDLE;
 static bool  armed = false;          // motor energized? (stages 2-4 require arm)
 static bool  foc_ready = false;      // initFOC() (alignment) done once
-static bool  ol_mode = false;        // dual-mode: true = open-loop (ramp_vel > crossover)
-static float ol_elec_angle = 0.0f;   // manually-integrated electrical angle (open-loop mode)
-static uint32_t ol_last_us = 0;      // last open-loop commutation timestamp
+static SpinControlMode spin_mode = ENCODER_FOC;
+static uint32_t sensorless_last_us = 0;
+static uint32_t sensorless_enter_ms = 0;
+static bool sensorless_loss_reported = false;
+static float g_observer_phase_err = 0.0f;
+static float g_observer_rpm = 0.0f;
+static float g_observer_bemf = 0.0f;
+static float g_last_current_a = 0.0f;
+static SensorlessObserver observer;
+
+struct PidProfile {
+  const char *name;
+  float velocityP;
+  float velocityI;
+  float velocityTf;
+  float currentP;
+  float currentI;
+};
+
+static const PidProfile SPIN_PROFILE  = {"spin",  0.05f, 0.10f, 0.15f, 0.3f, 20.0f};
+static const PidProfile CRAWL_PROFILE = {"crawl", 1.50f, 0.10f, 0.15f, 0.3f, 20.0f};
+static const PidProfile *active_pid_profile = &SPIN_PROFILE;
+
+enum CalibrationState {
+  CAL_IDLE = 0,
+  CAL_ALIGN,
+  CAL_ENCODER_CHECK,
+  CAL_CURRENT_CHECK,
+  CAL_LOW_SPEED_PID,
+  CAL_OBSERVER_SHADOW,
+  CAL_DONE,
+  CAL_FAILED
+};
+
+static CalibrationState cal_state = CAL_IDLE;
+static uint32_t cal_state_ms = 0;
+static uint16_t cal_encoder_start = 0;
+static uint8_t cal_step = 0;
+static float cal_target_rpm = 0.0f;
+static float cal_max_abs_rpm_err = 0.0f;
+static float cal_sum_abs_rpm_err = 0.0f;
+static float cal_max_current = 0.0f;
+static float cal_saved_ramp_accel = 5.0f * REV;
+static uint16_t cal_samples = 0;
+static char cal_error[24] = "none";
+
+static const float CAL_RPM_STEPS[] = {500.0f, 1000.0f, 2000.0f, 3000.0f, 4000.0f};
+static const uint8_t CAL_RPM_STEP_COUNT = sizeof(CAL_RPM_STEPS) / sizeof(CAL_RPM_STEPS[0]);
+#define CAL_ALIGN_TIMEOUT_MS       4000U
+#define CAL_ENCODER_CHECK_MS        350U
+#define CAL_CURRENT_CHECK_MS        700U
+#define CAL_PID_STEP_MS            1200U
+#define CAL_OBSERVER_SHADOW_MS     1200U
+#define CAL_ENCODER_STILL_COUNTS    200
+#define CAL_RPM_ERROR_LIMIT         800.0f
 
 // ----- gantry indexing (angle-control position move) ------------------------
 static bool  index_mode    = false;  // true = closed-loop angle move/hold to a tube
@@ -181,13 +250,75 @@ static bool     wd_tripped      = false;  // watchdog fired (latched until next 
 static const uint32_t LINK_WD_MS = 750;   // comms watchdog timeout (~0.5-1 s spec)
 
 // ----- helpers -------------------------------------------------------------
+static const char *spinModeName() {
+  switch (spin_mode) {
+    case ENCODER_FOC:     return "spin-enc";
+    case OBSERVER_SHADOW: return "spin-shadow";
+    case SENSORLESS_PLL:  return "spin-sensorless";
+    case FAULT_RAMPDOWN:  return "spin-fault-ramp";
+    default:              return "spin-unknown";
+  }
+}
+
+static bool sensorlessModeActive() {
+  return spin_mode == SENSORLESS_PLL || spin_mode == FAULT_RAMPDOWN;
+}
+
+static const char *calStateName() {
+  switch (cal_state) {
+    case CAL_IDLE:            return "idle";
+    case CAL_ALIGN:           return "align";
+    case CAL_ENCODER_CHECK:   return "encoder-check";
+    case CAL_CURRENT_CHECK:   return "current-check";
+    case CAL_LOW_SPEED_PID:   return "low-speed-pid";
+    case CAL_OBSERVER_SHADOW: return "observer-shadow";
+    case CAL_DONE:            return "done";
+    case CAL_FAILED:          return "failed";
+    default:                  return "unknown";
+  }
+}
+
+static bool calibrationRunning() {
+  return cal_state != CAL_IDLE && cal_state != CAL_DONE && cal_state != CAL_FAILED;
+}
+
+static bool calibrationMotionActive() {
+  return calibrationRunning();
+}
+
+static void applyPidProfile(const PidProfile &profile) {
+  active_pid_profile = &profile;
+  motor.PID_velocity.P = profile.velocityP;
+  motor.PID_velocity.I = profile.velocityI;
+  motor.PID_velocity.output_ramp = 200.0f;
+  motor.LPF_velocity.Tf = profile.velocityTf;
+  motor.PID_current_q.P = profile.currentP;
+  motor.PID_current_q.I = profile.currentI;
+  motor.PID_current_q.limit = MOTOR_VOLT_LIMIT;
+  motor.PID_current_d.P = profile.currentP;
+  motor.PID_current_d.I = profile.currentI;
+  motor.PID_current_d.limit = MOTOR_VOLT_LIMIT;
+}
+
+static void printTune() {
+  Serial.print("TUNE profile="); Serial.print(active_pid_profile->name);
+  Serial.print(" velP=");        Serial.print(motor.PID_velocity.P, 4);
+  Serial.print(" velI=");        Serial.print(motor.PID_velocity.I, 4);
+  Serial.print(" velTf=");       Serial.print(motor.LPF_velocity.Tf, 4);
+  Serial.print(" curP=");        Serial.print(motor.PID_current_q.P, 4);
+  Serial.print(" curI=");        Serial.print(motor.PID_current_q.I, 4);
+  Serial.print(" ilim=");        Serial.print(motor.current_limit, 3);
+  Serial.println(" save=0");
+}
+
 static void disarm(const char *why) {
   motor.disable();
   armed = false;
   cmd_vel = ramp_vel = 0.0f;
   // Always leave the motor in closed-loop VELOCITY config so the next arm starts there
   // (a disarm from the open-loop or indexing regime must not strand those settings).
-  ol_mode = false;
+  spin_mode = ENCODER_FOC;
+  sensorless_loss_reported = false;
   index_mode = false;
   motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::foc_current;
@@ -220,6 +351,13 @@ static void printStat() {
   Serial.print(" vel=");       Serial.print(tele_vel, 3);                     // rev/s, interval-averaged
   Serial.print(" tgt=");       Serial.print(ramp_vel / REV, 3);
   Serial.print(" cmd=");       Serial.print(cmd_vel / REV, 3);
+  Serial.print(" mode=");      Serial.print(spinModeName());
+  Serial.print(" cal=");       Serial.print(calStateName());
+  Serial.print(" cal_step=");  Serial.print(cal_step);
+  Serial.print(" obs_rpm=");   Serial.print(g_observer_rpm, 0);
+  Serial.print(" obs_lock=");  Serial.print(observer.locked() ? 1 : 0);
+  Serial.print(" phase_err="); Serial.print(g_observer_phase_err * 180.0f / _PI, 1);
+  Serial.print(" bemf=");      Serial.print(g_observer_bemf, 2);
   if (stage == CURRENT || stage == CLOSEDLOOP) {
     PhaseCurrent_s c = currentSense.getPhaseCurrents();
     float mag = currentSense.getDCCurrent();
@@ -250,26 +388,36 @@ static float olVoltage(float rpm) {
   return _constrain(v, OL_BEMF_MARGIN, OL_VOLT_CAP);
 }
 
-// Hand off closed-loop -> open-loop. We drive the commutation MANUALLY (via
-// setPhaseVoltage) rather than SimpleFOC's velocity_openloop, so we can seed the
-// electrical angle from the rotor's actual calibrated position -- commutation then
-// continues from where the rotor IS, staying synchronized (both are at the crossover
-// speed). UNTUNED: validate the handoff at the real crossover speed + supply.
-static void enterOpenLoopMode() {
-  ol_mode = true;
-  ol_elec_angle = motor.electricalAngle();   // rotor's real (calibrated) electrical position
-  ol_last_us = micros();
-  Serial.println("MODE open-loop (> crossover)");
+// Hand off encoder FOC -> sensorless PLL. Seed the observer from the calibrated
+// encoder angle, then let its PLL carry the electrical angle at high speed.
+static void enterSensorlessMode(float encoderElectricalAngle, float encoderRpm) {
+  spin_mode = SENSORLESS_PLL;
+  sensorless_loss_reported = false;
+  observer.resetFromElectrical(encoderElectricalAngle, encoderRpm);
+  sensorless_last_us = micros();
+  sensorless_enter_ms = millis();
+  Serial.println("MODE sensorless PLL (> crossover)");
 }
 
-// Hand off open-loop -> closed-loop. The encoder was kept fresh during open-loop,
-// so FOC re-locks using the calibrated zero_electric_angle. UNTUNED.
+// Hand off sensorless -> encoder FOC. The encoder is kept fresh during sensorless
+// operation so FOC can re-lock below the crossover.
 static void enterClosedLoopMode() {
-  ol_mode = false;
+  spin_mode = ENCODER_FOC;
+  sensorless_loss_reported = false;
   motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.voltage_limit = MOTOR_VOLT_LIMIT;
-  Serial.println("MODE closed-loop (< crossover)");
+  Serial.println("MODE encoder FOC (< crossover)");
+}
+
+static void enterFaultRampdown(const char *why) {
+  if (!sensorless_loss_reported) {
+    Serial.print("MODE sensorless fault rampdown: ");
+    Serial.println(why);
+    sensorless_loss_reported = true;
+  }
+  spin_mode = FAULT_RAMPDOWN;
+  cmd_vel = 0.0f;
 }
 
 // Configure the motor for a stage and (for powered stages) energize it.
@@ -356,17 +504,25 @@ static void printST() {
 
   float rpm     = vel * 60.0f;
   float tgt_rpm = (cmd_vel / REV) * 60.0f;
-  // Current sense is only valid in closed loop (open-loop runs past the lowside-CS
-  // duty limit), so report it only there.
-  float cur = (armed && stage == CLOSEDLOOP && !ol_mode && !index_mode) ? currentSense.getDCCurrent() : 0.0f;
+  float cur = (armed && stage == CLOSEDLOOP && !index_mode) ? g_last_current_a : 0.0f;
   const char *st = !armed ? "idle"
                           : index_mode ? (index_arrived ? "indexed" : "indexing")
-                          : (stop_then_disarm ? "stopping" : (ol_mode ? "spin-ol" : "spin"));
+                          : (stop_then_disarm ? "stopping" : spinModeName());
 
   Serial.print("ST rpm=");   Serial.print(rpm, 0);
   Serial.print(" tgt=");     Serial.print(tgt_rpm, 0);
   Serial.print(" state=");   Serial.print(st);
+  Serial.print(" hz=");      Serial.print(g_loop_hz);
   Serial.print(" cur=");     Serial.print(cur, 2);
+  Serial.print(" cal=");     Serial.print(calStateName());
+  Serial.print(" cal_step="); Serial.print(cal_step);
+  Serial.print(" cal_target="); Serial.print(cal_target_rpm, 0);
+  Serial.print(" cal_err="); Serial.print(cal_error);
+  Serial.print(" obs_rpm="); Serial.print(g_observer_rpm, 0);
+  Serial.print(" obs_lock="); Serial.print(observer.locked() ? 1 : 0);
+  Serial.print(" phase_err="); Serial.print(g_observer_phase_err * 180.0f / _PI, 1);
+  Serial.print(" bus=");     Serial.print(SUPPLY_VOLTAGE, 1);
+  Serial.print(" ilim=");    Serial.print(motor.current_limit, 2);
   Serial.print(" pos=");     Serial.print(encoder.getMechanicalAngle() * 180.0f / _PI, 1);  // deg [0,360)
   Serial.print(" tube=");    Serial.print(index_tube);
   Serial.println();
@@ -436,6 +592,251 @@ static void linkPing() {
   Serial.println("OK PONG");
 }
 
+static bool argEquals(const char *arg, const char *want) {
+  while (*arg == ' ') arg++;
+  while (*want != '\0') {
+    char a = *arg++;
+    if (a >= 'a' && a <= 'z') a = (char)(a - ('a' - 'A'));
+    if (a != *want++) return false;
+  }
+  return *arg == '\0' || *arg == ' ' || *arg == '?';
+}
+
+static void resetCalMetrics() {
+  cal_max_abs_rpm_err = 0.0f;
+  cal_sum_abs_rpm_err = 0.0f;
+  cal_max_current = 0.0f;
+  cal_samples = 0;
+}
+
+static void setCalState(CalibrationState state) {
+  cal_state = state;
+  cal_state_ms = millis();
+  resetCalMetrics();
+  if (state == CAL_ENCODER_CHECK) {
+    cal_encoder_start = (uint16_t)TIM4->CNT;
+  }
+  if (state == CAL_LOW_SPEED_PID && cal_step < CAL_RPM_STEP_COUNT) {
+    cal_target_rpm = CAL_RPM_STEPS[cal_step];
+    cmd_vel = (cal_target_rpm / 60.0f) * REV;
+  }
+  if (state == CAL_OBSERVER_SHADOW) {
+    cal_target_rpm = CROSSOVER_RPM;
+    cmd_vel = (cal_target_rpm / 60.0f) * REV;
+  }
+  if (state == CAL_DONE) {
+    cal_target_rpm = 0.0f;
+    cmd_vel = 0.0f;
+  }
+}
+
+static void calFail(const char *reason) {
+  strncpy(cal_error, reason, sizeof(cal_error) - 1U);
+  cal_error[sizeof(cal_error) - 1U] = '\0';
+  ramp_accel = cal_saved_ramp_accel;
+  disarm("cal failed");
+  cal_state = CAL_FAILED;
+  cal_state_ms = millis();
+  Serial.print("ERR CAL "); Serial.println(cal_error);
+}
+
+static void finishCalibration() {
+  strncpy(cal_error, "none", sizeof(cal_error) - 1U);
+  cal_error[sizeof(cal_error) - 1U] = '\0';
+  ramp_accel = cal_saved_ramp_accel;
+  setCalState(CAL_DONE);
+  Serial.println("OK CAL DONE");
+}
+
+static void printCalStatus() {
+  float rpm = (encoder.getVelocity() / REV) * 60.0f;
+  Serial.print("CAL state=");      Serial.print(calStateName());
+  Serial.print(" step=");          Serial.print(cal_step);
+  Serial.print(" rpm=");           Serial.print(rpm, 0);
+  Serial.print(" target=");        Serial.print(cal_target_rpm, 0);
+  Serial.print(" cur=");           Serial.print(g_last_current_a, 2);
+  Serial.print(" loop_hz=");       Serial.print(g_loop_hz);
+  Serial.print(" zero=");          Serial.print(motor.zero_electric_angle, 4);
+  Serial.print(" dir=");           Serial.print((int)motor.sensor_direction);
+  Serial.print(" obs_rpm=");       Serial.print(g_observer_rpm, 0);
+  Serial.print(" obs_lock=");      Serial.print(observer.locked() ? 1 : 0);
+  Serial.print(" phase_err=");     Serial.print(g_observer_phase_err * 180.0f / _PI, 1);
+  Serial.print(" max_err=");       Serial.print(cal_max_abs_rpm_err, 0);
+  Serial.print(" max_cur=");       Serial.print(cal_max_current, 2);
+  Serial.print(" profile=");       Serial.print(active_pid_profile->name);
+  Serial.print(" err=");           Serial.print(cal_error);
+  Serial.println(" save=0");
+}
+
+static void startCalibration() {
+  link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  if (calibrationMotionActive()) {
+    Serial.println("ERR CAL busy");
+    return;
+  }
+  cal_saved_ramp_accel = ramp_accel;
+  ramp_accel = 20.0f * REV;
+  applyPidProfile(SPIN_PROFILE);
+  if (stage != CLOSEDLOOP) enterStage(CLOSEDLOOP);
+  cal_step = 0;
+  cal_target_rpm = 0.0f;
+  strncpy(cal_error, "none", sizeof(cal_error) - 1U);
+  cal_error[sizeof(cal_error) - 1U] = '\0';
+  observer.resetFromElectrical(0.0f, 0.0f);
+  setCalState(CAL_ALIGN);
+  Serial.println("OK CAL START");
+}
+
+static void stopCalibration() {
+  link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  ramp_accel = cal_saved_ramp_accel;
+  cal_state = CAL_IDLE;
+  cal_target_rpm = 0.0f;
+  cal_step = 0;
+  strncpy(cal_error, "none", sizeof(cal_error) - 1U);
+  cal_error[sizeof(cal_error) - 1U] = '\0';
+  disarm("cal stop");
+  Serial.println("OK CAL STOP");
+}
+
+static void handleCalCommand(const char *arg) {
+  if (argEquals(arg, "START"))  { startCalibration(); return; }
+  if (argEquals(arg, "STOP"))   { stopCalibration();  return; }
+  if (argEquals(arg, "STATUS")) { link_mode = true; last_link_ms = millis(); wd_tripped = false; printCalStatus(); return; }
+  if (argEquals(arg, "APPLY"))  { applyPidProfile(SPIN_PROFILE); Serial.println("OK CAL APPLY profile=spin save=0"); return; }
+  Serial.println("ERR CAL verb");
+}
+
+static void handleProfileCommand(const char *arg) {
+  link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  if (argEquals(arg, "SPIN")) {
+    applyPidProfile(SPIN_PROFILE);
+    Serial.println("OK PROFILE SPIN");
+    return;
+  }
+  if (argEquals(arg, "CRAWL")) {
+    applyPidProfile(CRAWL_PROFILE);
+    Serial.println("OK PROFILE CRAWL");
+    return;
+  }
+  Serial.println("ERR PROFILE verb");
+}
+
+static void serviceCalibration() {
+  uint32_t now = millis();
+  if (cal_state == CAL_IDLE || cal_state == CAL_FAILED) {
+    return;
+  }
+
+  if (cal_state == CAL_ALIGN) {
+    if (!armed) {
+      arm();
+      if (!armed) {
+        if ((uint32_t)(now - cal_state_ms) > CAL_ALIGN_TIMEOUT_MS) {
+          calFail("align-timeout");
+        }
+        return;
+      }
+      ramp_vel = 0.0f;
+      cmd_vel = 0.0f;
+      setCalState(CAL_ENCODER_CHECK);
+    }
+  }
+
+  if (!armed) {
+    return;
+  }
+
+  motor.loopFOC();
+  updateRamp();
+  motor.move(ramp_vel);
+
+  PhaseCurrent_s c = currentSense.getPhaseCurrents();
+  (void)c;
+  g_last_current_a = fabsf(currentSense.getDCCurrent());
+  float rpm = (encoder.getVelocity() / REV) * 60.0f;
+  float abs_err = fabsf(rpm - cal_target_rpm);
+  if (g_last_current_a > cal_max_current) cal_max_current = g_last_current_a;
+  if (abs_err > cal_max_abs_rpm_err) cal_max_abs_rpm_err = abs_err;
+  cal_sum_abs_rpm_err += abs_err;
+  cal_samples++;
+
+  uint32_t elapsed = now - cal_state_ms;
+  switch (cal_state) {
+    case CAL_ENCODER_CHECK: {
+      cmd_vel = 0.0f;
+      if (elapsed >= CAL_ENCODER_CHECK_MS) {
+        int32_t diff = (int32_t)((uint16_t)TIM4->CNT) - (int32_t)cal_encoder_start;
+        if (diff < 0) diff = -diff;
+        if (diff > CAL_ENCODER_STILL_COUNTS) {
+          calFail("encoder-moving");
+        } else if ((int)motor.sensor_direction == 0) {
+          calFail("encoder-dir");
+        } else {
+          setCalState(CAL_CURRENT_CHECK);
+        }
+      }
+      break;
+    }
+    case CAL_CURRENT_CHECK:
+      cmd_vel = 0.0f;
+      if (elapsed >= CAL_CURRENT_CHECK_MS) {
+        if (cal_max_current > motor.current_limit + 0.75f) {
+          calFail("current-high");
+        } else {
+          cal_step = 0;
+          setCalState(CAL_LOW_SPEED_PID);
+        }
+      }
+      break;
+    case CAL_LOW_SPEED_PID:
+      if (elapsed > (CAL_PID_STEP_MS / 2U) &&
+          cal_samples > 5U &&
+          cal_max_abs_rpm_err > CAL_RPM_ERROR_LIMIT) {
+        calFail("pid-track");
+        break;
+      }
+      if (elapsed >= CAL_PID_STEP_MS) {
+        cal_step++;
+        if (cal_step < CAL_RPM_STEP_COUNT) {
+          setCalState(CAL_LOW_SPEED_PID);
+        } else {
+#if HIGH_SPEED_SENSORLESS
+          setCalState(CAL_OBSERVER_SHADOW);
+#else
+          finishCalibration();
+#endif
+        }
+      }
+      break;
+    case CAL_OBSERVER_SHADOW: {
+      float encoder_elec = motor.electricalAngle();
+      uint32_t nowus = micros();
+      float dt = (nowus - sensorless_last_us) * 1e-6f;
+      sensorless_last_us = nowus;
+      float shadow_uq = olVoltage(fabsf(cal_target_rpm));
+      observer.update(c.a, c.b, c.c, shadow_uq, 0.0f, encoder_elec,
+                      encoder_elec, rpm, dt);
+      g_observer_rpm = observer.rpmMechanical();
+      g_observer_phase_err = observer.phaseErrorToEncoder();
+      g_observer_bemf = observer.bemfVolts();
+      spin_mode = OBSERVER_SHADOW;
+      if (elapsed >= CAL_OBSERVER_SHADOW_MS) {
+        finishCalibration();
+      }
+      break;
+    }
+    case CAL_DONE:
+      cmd_vel = 0.0f;
+      if (fabsf(ramp_vel) < 0.1f) {
+        disarm("cal done");
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 // Returns true if the line was a high-level verb (and was handled).
 static bool handleHighLevel(const char *line) {
   char tok[12];
@@ -454,6 +855,11 @@ static bool handleHighLevel(const char *line) {
   if (strcmp(tok, "STOP") == 0)    { linkStop();          return true; }
   if (strcmp(tok, "ESTOP") == 0)   { linkEstop();         return true; }
   if (strcmp(tok, "PING") == 0)    { linkPing();          return true; }
+  if (strcmp(tok, "CAL") == 0)     { handleCalCommand(arg); return true; }
+  if (strcmp(tok, "PROFILE") == 0) { handleProfileCommand(arg); return true; }
+  if (strcmp(tok, "TUNE?") == 0 ||
+      strcmp(tok, "TUNE") == 0)    { link_mode = true; last_link_ms = millis();
+                                     wd_tripped = false; printTune(); return true; }
   if (strcmp(tok, "STATUS?") == 0 ||
       strcmp(tok, "STATUS") == 0)  { link_mode = true; last_link_ms = millis();
                                      wd_tripped = false; printST(); return true; }
@@ -591,10 +997,7 @@ void setup() {
   // marginal and, after the loaded assembly shifted slightly, oscillated/reversed
   // at speed (smooth open-loop, unstable closed-loop). Softer P/I + more velocity
   // filtering restored the stability margin -- rock-solid 0..4000 RPM. Live: `p/i/f`.
-  motor.PID_velocity.P = 0.05f;
-  motor.PID_velocity.I = 0.10f;
-  motor.PID_velocity.output_ramp = 200.0f;
-  motor.LPF_velocity.Tf = 0.15f;
+  applyPidProfile(SPIN_PROFILE);
 
   // Position loop (used only by the INDEX angle-control move to a tube). Gentle P so the
   // gantry indexes smoothly into the detent; the inner velocity/current loops still bound it.
@@ -602,10 +1005,22 @@ void setup() {
 
   // Inner current loop (foc_current). I dropped 100 -> 20 as part of the same retune
   // (the aggressive current integral was feeding the oscillation). Tune P `q`, I `j`.
-  motor.PID_current_q.P = 0.3f;  motor.PID_current_q.I = 20.0f;  motor.PID_current_q.limit = MOTOR_VOLT_LIMIT;
-  motor.PID_current_d.P = 0.3f;  motor.PID_current_d.I = 20.0f;  motor.PID_current_d.limit = MOTOR_VOLT_LIMIT;
   motor.LPF_current_q.Tf = 0.005f;
   motor.LPF_current_d.Tf = 0.005f;
+
+  SensorlessObserverConfig obsCfg;
+  obsCfg.polePairs = POLE_PAIRS;
+  obsCfg.phaseResistanceOhm = MOTOR_PHASE_RESISTANCE_OHM;
+  obsCfg.phaseInductanceH = MOTOR_PHASE_INDUCTANCE_H;
+  obsCfg.kvRpmPerVolt = MOTOR_KV;
+  obsCfg.pllKp = 250.0f;
+  obsCfg.pllKi = 4000.0f;
+  obsCfg.minBemfVolts = SENSORLESS_MIN_BEMF_V;
+  obsCfg.lockPhaseErrorRad = SENSORLESS_LOCK_ERR_RAD;
+  obsCfg.lockRpmError = SENSORLESS_LOCK_RPM_ERR;
+  obsCfg.lockDwellMs = SENSORLESS_LOCK_DWELL_MS;
+  obsCfg.maxRpm = MAX_SPIN_RPM;
+  observer.begin(obsCfg);
 
   bool ok_motor = motor.init();
   Serial.print("INIT driver="); Serial.print(ok_drv);
@@ -617,6 +1032,7 @@ void setup() {
   // NOTE: initFOC() is deferred to arm() in stage 4 -- needs bus power present.
 
   last_ramp_us = micros();
+  sensorless_last_us = last_ramp_us;
   Serial.println("READY. Encoder live, motor OFF.");
   Serial.println("Start at stage 1: send `1`, turn the shaft, confirm rev tracks. (h=help)");
 }
@@ -625,7 +1041,9 @@ void loop() {
   static uint32_t loop_count = 0;
   loop_count++;
 
-  if (armed) {
+  if ((calibrationRunning() || (cal_state == CAL_DONE && armed)) && stage == CLOSEDLOOP) {
+    serviceCalibration();
+  } else if (armed) {
     // SimpleFOC 2.4.0: loopFOC() drives the phases in closed loop; move() computes
     // the setpoint and (in open loop) advances the commutation angle. Keep this path
     // TIGHT: at high speed commutation must refresh far faster than the electrical Hz.
@@ -638,30 +1056,85 @@ void loop() {
         Serial.print("OK INDEX DONE "); Serial.println(index_tube);
       }
     } else if (stage == CLOSEDLOOP) {
-      // Dual-mode: closed-loop FOC below the crossover, open-loop above it. The
-      // switch is driven by the ramped setpoint, with hysteresis so it can't chatter.
-      float ramp_rpm = (ramp_vel / REV) * 60.0f;
-      if      (!ol_mode && ramp_rpm > CROSSOVER_RPM + CROSSOVER_HYST_RPM) enterOpenLoopMode();
-      else if ( ol_mode && ramp_rpm < CROSSOVER_RPM - CROSSOVER_HYST_RPM) enterClosedLoopMode();
-
-      if (ol_mode) {
-        // Open-loop: advance the electrical angle at the commanded speed and apply a
-        // scheduled voltage. No current/position feedback -- the rotor stays in sync
-        // because it entered at the crossover speed. Keep the sensor fresh for the
-        // handoff back and for telemetry.
-        encoder.update();
-        updateRamp();
-        uint32_t nowus = micros();
-        float dt = (nowus - ol_last_us) * 1e-6f;
-        ol_last_us = nowus;
-        if (dt > 0.0f && dt < 0.1f)
-          ol_elec_angle = _normalizeAngle(ol_elec_angle + ramp_vel * (float)POLE_PAIRS * dt);
-        motor.setPhaseVoltage(olVoltage((ramp_vel / REV) * 60.0f), 0.0f, ol_elec_angle);
-      } else {
+      // High-speed builds keep encoder FOC below the crossover and run the
+      // observer in shadow before handing it authority over the electrical angle.
+#if HIGH_SPEED_SENSORLESS
+      if (!sensorlessModeActive()) {
         motor.loopFOC();                            // closed-loop current control (updates sensor)
         updateRamp();
         motor.move(ramp_vel);
+
+        PhaseCurrent_s c = currentSense.getPhaseCurrents();
+        g_last_current_a = fabsf(currentSense.getDCCurrent());
+        float ramp_rpm = (ramp_vel / REV) * 60.0f;
+        float encoder_rpm = (encoder.getVelocity() / REV) * 60.0f;
+        float encoder_elec = motor.electricalAngle();
+        uint32_t nowus = micros();
+        float dt = (nowus - sensorless_last_us) * 1e-6f;
+        sensorless_last_us = nowus;
+
+        if (ramp_rpm >= SENSORLESS_SHADOW_RPM) {
+          spin_mode = OBSERVER_SHADOW;
+          float shadow_uq = olVoltage(fabsf(ramp_rpm));
+          observer.update(c.a, c.b, c.c, shadow_uq, 0.0f, encoder_elec,
+                          encoder_elec, encoder_rpm, dt);
+        } else {
+          spin_mode = ENCODER_FOC;
+        }
+
+        g_observer_rpm = observer.rpmMechanical();
+        g_observer_phase_err = observer.phaseErrorToEncoder();
+        g_observer_bemf = observer.bemfVolts();
+
+        if (!calibrationRunning() &&
+            ramp_rpm > CROSSOVER_RPM + CROSSOVER_HYST_RPM && observer.locked()) {
+          enterSensorlessMode(encoder_elec, encoder_rpm);
+        }
+      } else {
+        encoder.update();                           // keep encoder fresh for telemetry/fallback
+        updateRamp();
+
+        uint32_t nowus = micros();
+        float dt = (nowus - sensorless_last_us) * 1e-6f;
+        sensorless_last_us = nowus;
+        float ramp_rpm = (ramp_vel / REV) * 60.0f;
+        float encoder_rpm = (encoder.getVelocity() / REV) * 60.0f;
+        float encoder_elec = motor.electricalAngle();
+        float uq = (spin_mode == FAULT_RAMPDOWN) ? 0.0f : olVoltage(fabsf(ramp_rpm));
+
+        PhaseCurrent_s c = currentSense.getPhaseCurrents();
+        g_last_current_a = fabsf(currentSense.getDCCurrent());
+        observer.update(c.a, c.b, c.c, uq, 0.0f, observer.angleElectrical(),
+                        encoder_elec, encoder_rpm, dt);
+
+        g_observer_rpm = observer.rpmMechanical();
+        g_observer_phase_err = observer.phaseErrorToEncoder();
+        g_observer_bemf = observer.bemfVolts();
+
+        bool grace_done = (uint32_t)(millis() - sensorless_enter_ms) > 150U;
+        if (spin_mode == SENSORLESS_PLL && grace_done && !observer.locked()) {
+          enterFaultRampdown("observer unlock");
+          uq = 0.0f;
+        }
+        if (spin_mode == SENSORLESS_PLL && g_last_current_a > SENSORLESS_TRIAL_CURRENT_A) {
+          enterFaultRampdown("trial current limit");
+          uq = 0.0f;
+        }
+        if (spin_mode == FAULT_RAMPDOWN && fabsf(encoder_rpm) < (CROSSOVER_RPM - CROSSOVER_HYST_RPM)) {
+          enterClosedLoopMode();
+        }
+
+        if (sensorlessModeActive()) {
+          motor.setPhaseVoltage(uq, 0.0f, observer.angleElectrical());
+        }
       }
+#else
+      spin_mode = ENCODER_FOC;
+      motor.loopFOC();                              // production default: encoder FOC only
+      updateRamp();
+      motor.move(ramp_vel);
+      g_last_current_a = fabsf(currentSense.getDCCurrent());
+#endif
     } else {
       motor.loopFOC();                              // bench stages 2/3 (open-loop / current)
       updateRamp();

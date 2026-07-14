@@ -165,7 +165,7 @@ bool sendErr(int32_t seq, const char *code) {
 }
 
 bool sendStatus(int32_t seq, const SystemContext &ctx) {
-  char line[256];
+  char line[512];
   size_t idx = 0U;
 
   idx = appendInt32(line, sizeof(line), idx, seq);
@@ -177,6 +177,23 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
 
   idx = appendLiteral(line, sizeof(line), idx, " RPM1=");
   idx = appendInt32(line, sizeof(line), idx, ctx.rpm1);
+
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_CAL=");
+  idx = appendLiteral(line, sizeof(line), idx, ctx.escCalState);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_CAL_STEP=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.escCalStep);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_CAL_TARGET=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.escCalTargetRpm);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_CUR_CA=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.escCurrentCentiamps);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_OBS_RPM=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.escObserverRpm);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_OBS_LOCK=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.escObserverLock));
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_PHASE_ERR_D10=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.escPhaseErrDeg10);
+  idx = appendLiteral(line, sizeof(line), idx, " ESC_LOOP_HZ=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.escLoopHz));
 
   idx = appendLiteral(line, sizeof(line), idx, " FAULT=");
   idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.fault));

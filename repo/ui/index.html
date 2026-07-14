@@ -322,11 +322,18 @@
     <section class="panel">
       <h2>Centrifuge <span class="statechip" id="runChip">—</span></h2>
       <div class="sub">Set the speed and time, then run. Arming is automatic.</div>
-      <div id="runTimer" style="display:none;font:600 13px var(--mono);color:var(--accent2);margin-top:2px"></div>
       <div class="fields">
-        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="7000" step="100"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 7000</span></label>
+        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="4000" step="100"><span id="rpmMaxLabel" style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 4000</span></label>
         <label class="field">Time<input type="number" id="inTime" value="10" min="0" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds hold</span></label>
         <label class="field">Ramp<input type="number" id="inRamp" value="10" min="1" max="120"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds</span></label>
+      </div>
+      <label class="hint" style="display:flex;align-items:center;gap:10px;margin-top:10px">
+        <input type="checkbox" id="hsMode" style="width:16px;height:16px">
+        <span>High-speed validation mode: allow UI commands up to 10000 RPM.</span>
+      </label>
+      <div class="hint" id="hsWarning" style="display:none;margin-top:6px;color:#ffd36b">
+        Bench-only. Flash matching <code>nano_esp32_hs</code> and <code>b_g431_esc1_hs</code> firmware first;
+        normal firmware still clamps commands to 4000 RPM.
       </div>
       <div class="spacer"></div>
       <div class="btnrow">
@@ -352,6 +359,31 @@
         </div>
         <div class="hint">Manual lock/unlock overrides the automatic gantry policy while stopped (SAFE IDLE / BOOT);
           it clears when a run or rotate starts, and the lock is always released while the rotor turns.</div>
+      </div>
+
+      <div class="subcard">
+        <h3>ESC calibration service</h3>
+        <div class="row">
+          <button id="btnCalStart" class="ctl">Start ESC calibration</button>
+          <button id="btnCalStop" class="ctl">Stop calibration</button>
+          <button id="btnCalStatus" class="ctl">Status</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="btnProfileSpin" class="ctl">Profile spin</button>
+          <button id="btnProfileCrawl" class="ctl">Profile crawl</button>
+          <button id="btnTuneStatus" class="ctl">Tune?</button>
+        </div>
+        <div class="grid" style="margin-top:12px">
+          <div class="ind"><div class="k">Cal state</div><div class="v" id="escCalState">—</div></div>
+          <div class="ind"><div class="k">Cal step</div><div class="v" id="escCalStep">—</div></div>
+          <div class="ind"><div class="k">Cal target</div><div class="v" id="escCalTarget">—</div></div>
+          <div class="ind"><div class="k">ESC current</div><div class="v" id="escCurrent">—</div></div>
+          <div class="ind"><div class="k">Loop Hz</div><div class="v" id="escLoopHz">—</div></div>
+          <div class="ind"><div class="k">Observer lock</div><div class="v" id="escObsLock">—</div></div>
+          <div class="ind"><div class="k">Observer RPM</div><div class="v" id="escObsRpm">—</div></div>
+          <div class="ind"><div class="k">Phase error</div><div class="v" id="escPhaseErr">—</div></div>
+        </div>
+        <div class="hint">Manual service-only. The motor may twitch/spin; use only while contained and stopped.</div>
       </div>
 
       <div class="subcard">
@@ -415,16 +447,16 @@ if (transport === 'serial' && !('serial' in navigator)) {
 
 // ================= protocol / connection =================
 const BAUD = 115200;
+const RUN_RPM_LIMITS = { normal: 4000, highSpeed: 10000 };
+function loadHighSpeedPreference() {
+  try { return typeof localStorage !== 'undefined' && localStorage.getItem('centrifugeHighSpeed') === '1'; }
+  catch { return false; }
+}
+let highSpeedMode = _params.get('hs') === '1' || loadHighSpeedPreference();
+let MAX_RUN_RPM = RUN_RPM_LIMITS.normal;
 let port=null, reader=null, writer=null, keepReading=false, seq=0, rxBuf='';
 const pending = new Map();
 let lastStatus = null;
-
-// Live run countdown. STATUS carries no clock, so timing is client-side: each phase is
-// anchored on the state transition seen by the poll, and the nominal durations come from
-// the profile doRun() sent. If the page (re)loads mid-run the profile is unknown -> show
-// elapsed time in the phase instead of a countdown.
-let runProfile = null;                 // {rampMs, seatMs, holdMs} of the last RUN we issued
-let runPhase = null, runPhaseT0 = 0;
 
 const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN RAMP','SPIN HOLD','STOPPING','HARD STOP','FAULT',
   'CLOSING','UNLOCKING','SETTLING','LOCKING','OPENING',      // 10-14 run cycle
@@ -441,6 +473,26 @@ const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const log = (msg, cls='') => { const el=$('log'); if(!el) return;
   const at = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
   el.innerHTML += `<span class="${cls}">${msg}</span>\n`; if (at) el.scrollTop = el.scrollHeight; };
+
+function setHighSpeedMode(on, { persist=false } = {}) {
+  highSpeedMode = !!on;
+  MAX_RUN_RPM = highSpeedMode ? RUN_RPM_LIMITS.highSpeed : RUN_RPM_LIMITS.normal;
+  const rpmInput = $('inRpm');
+  if (rpmInput) {
+    rpmInput.max = String(MAX_RUN_RPM);
+    if ((+rpmInput.value || 0) > MAX_RUN_RPM) rpmInput.value = String(MAX_RUN_RPM);
+  }
+  const rpmLabel = $('rpmMaxLabel');
+  if (rpmLabel) rpmLabel.textContent = `RPM · max ${MAX_RUN_RPM}`;
+  const warning = $('hsWarning');
+  if (warning) warning.style.display = highSpeedMode ? '' : 'none';
+  const toggle = $('hsMode');
+  if (toggle) toggle.checked = highSpeedMode;
+  if (persist) {
+    try { localStorage.setItem('centrifugeHighSpeed', highSpeedMode ? '1' : '0'); } catch {}
+  }
+  if (lastStatus) render(lastStatus);
+}
 
 async function connect() {
   try {
@@ -548,7 +600,12 @@ function stopPolling(){ if (pollTimer) clearInterval(pollTimer); pollTimer=null;
 async function poll(){
   if (polling) return; polling=true;
   try { const r = await send('STATUS',{quiet:true,timeout:1000}); const f={};
-    r.rest.replace(/(\w+)=(-?\d+)/g,(_,k,v)=>{ f[k]=+v; return ''; }); lastStatus=f; render(f); }
+    r.rest.trim().split(/\s+/).forEach(part => {
+      const m = part.match(/^(\w+)=(.+)$/);
+      if (!m) return;
+      f[m[1]] = /^-?\d+$/.test(m[2]) ? +m[2] : m[2];
+    });
+    lastStatus=f; render(f); }
   catch { /* transient */ }
   finally { polling=false; }
 }
@@ -610,10 +667,12 @@ function render(f) {
   if (!f) {
     $('rpmActual').textContent='—'; $('rpmTarget').textContent='—'; $('stateName').textContent='—';
     $('rpmBar').style.width='0'; $('sceneText').textContent='Offline';
-    $('runTimer').style.display='none';
     $('scenePill').className='scenePill'; $('btnClear').style.display='none';
     $('metaTube').textContent='Tube —'; $('metaDoor').textContent='Door —'; $('metaLock').textContent='Lock —';
     chip($('doorChip'),'—'); chip($('tubeChip'),'—'); chip($('runChip'),'—'); chip($('audioChip'),'—');
+    $('escCalState').textContent='—'; $('escCalStep').textContent='—'; $('escCalTarget').textContent='—';
+    $('escCurrent').textContent='—'; $('escLoopHz').textContent='—'; $('escObsLock').textContent='—';
+    $('escObsRpm').textContent='—'; $('escPhaseErr').textContent='—';
     $('indicators').innerHTML=''; drawDoor(null); drawDial(null); updatePower(null);
     return;
   }
@@ -623,7 +682,7 @@ function render(f) {
   $('rpmActual').textContent = (f.RPM1 ?? 0);
   $('rpmTarget').textContent = (f.RPM_CMD ?? 0);
   $('stateName').textContent = STATE_NAMES[st] || ('state '+st);
-  $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/7000)*100,0,100) + '%';
+  $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/MAX_RUN_RPM)*100,0,100) + '%';
   $('btnClear').style.display = (f.FAULT ? '' : 'none');
 
   const locked = (f.LOCKCMD ?? f.LOCK) ? true : false;
@@ -653,10 +712,19 @@ function render(f) {
        running?'run':st===1?'good':'');
   $('btnRun').disabled   = !(st===0 || st===1);
   $('btnAbort').disabled = !(st===6 || st===7);
-  updateRunTimer(st);
+  ['btnCalStart','btnCalStop','btnCalStatus','btnProfileSpin','btnProfileCrawl','btnTuneStatus']
+    .forEach(id => { $(id).disabled = !STOPPED(st); });
 
   // ---- debug: audio + telemetry ----
   chip($('audioChip'), f.AUDIO ? 'ready' : 'no module', f.AUDIO?'good':'bad');
+  $('escCalState').textContent = f.ESC_CAL ?? 'idle';
+  $('escCalStep').textContent = f.ESC_CAL_STEP ?? 0;
+  $('escCalTarget').textContent = ((f.ESC_CAL_TARGET ?? 0) + ' rpm');
+  $('escCurrent').textContent = (((f.ESC_CUR_CA ?? 0) / 100).toFixed(2) + ' A');
+  $('escLoopHz').textContent = f.ESC_LOOP_HZ ?? 0;
+  $('escObsLock').textContent = f.ESC_OBS_LOCK ? 'locked' : 'no lock';
+  $('escObsRpm').textContent = f.ESC_OBS_RPM ?? 0;
+  $('escPhaseErr').textContent = (((f.ESC_PHASE_ERR_D10 ?? 0) / 10).toFixed(1) + '°');
   const ind = [
     ['State', STATE_NAMES[st]||st, running?'warn':''],
     ['Fault', FAULT_NAMES[f.FAULT] ?? f.FAULT, f.FAULT?'bad':'good'],
@@ -667,6 +735,11 @@ function render(f) {
     ['Lock cmd', locked?'locked':'released', locked?'good':'warn'],
     ['Tube', tube||'?', tube?'good':''], ['Home', f.HOMED?'set':'unset', f.HOMED?'good':'bad'],
     ['Motor EN', f.ENABLE?'on':'off', f.ENABLE?'good':''], ['Power', f.POWER?'on':'off', f.POWER?'good':''],
+    ['ESC cal', f.ESC_CAL ?? 'idle', f.ESC_CAL==='failed'?'bad':f.ESC_CAL==='done'?'good':''],
+    ['ESC current', (((f.ESC_CUR_CA ?? 0) / 100).toFixed(2) + ' A'), ''],
+    ['ESC loop Hz', f.ESC_LOOP_HZ ?? 0, ''],
+    ['Observer', f.ESC_OBS_LOCK?'locked':'no lock', f.ESC_OBS_LOCK?'good':'warn'],
+    ['Phase err', (((f.ESC_PHASE_ERR_D10 ?? 0) / 10).toFixed(1) + '°'), ''],
     ['Fan', f.FAN?'on':'off', f.FAN?'good':''], ['Audio', f.AUDIO?'ok':'—', f.AUDIO?'good':'bad'],
   ];
   $('indicators').innerHTML = ind.map(([k,v,c]) =>
@@ -674,32 +747,6 @@ function render(f) {
 
   updatePower(f);
 }
-
-// ---- live run countdown ----
-// Phases: ramp-up = LIFT RAMP(3) + SEAT HOLD(4) + MAIN RAMP(5) (nominal RAMPUP + seat dwell);
-// hold = SPIN HOLD(6) (nominal HOLD); stop = STOPPING(7) (nominal RAMPDOWN, which doRun
-// sends equal to RAMPUP). Countdowns round up so "0:01 left" holds until the phase ends.
-function updateRunTimer(st){
-  const phase = st===6 ? 'hold' : st===7 ? 'stop' : (st>=3 && st<=5) ? 'ramp' : null;
-  if (phase !== runPhase) { runPhase = phase; runPhaseT0 = Date.now(); }
-  const el = $('runTimer');
-  if (!phase) { el.style.display='none'; return; }
-  const label = phase==='hold' ? 'At speed' : phase==='ramp' ? 'Ramping up' : 'Stopping';
-  const mmss = s => Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  const elapsed = Date.now() - runPhaseT0;
-  let text;
-  if (runProfile) {
-    const total = phase==='hold' ? runProfile.holdMs
-                : phase==='ramp' ? runProfile.rampMs + runProfile.seatMs
-                : runProfile.rampMs;
-    text = label + ' · ' + mmss(Math.ceil(Math.max(0, total - elapsed)/1000)) + ' left';
-  } else {
-    text = label + ' · ' + mmss(Math.floor(elapsed/1000)) + ' elapsed';
-  }
-  el.style.display = ''; el.textContent = text;
-}
-// Tick between polls so the seconds count down smoothly.
-setInterval(() => { if (lastStatus) updateRunTimer(lastStatus.STATE ?? 0); }, 200);
 
 // ---- door glyph (simple animated box + lid) ----
 function drawDoor(f) {
@@ -751,10 +798,9 @@ function updatePower(f){ const on=!!(f&&f.POWER);
 
 async function doRun(){
   const f = lastStatus || {}; const st = f.STATE ?? 0;
-  const target = clamp(+$('inRpm').value||0, 0, 7000);
+  const target = clamp(+$('inRpm').value||0, 0, MAX_RUN_RPM);
   const hold = Math.max(0, +$('inTime').value||0) * 1000;
   const ramp = Math.max(1, +$('inRamp').value||1) * 1000;
-  runProfile = { rampMs: ramp, seatMs: 500, holdMs: hold };   // seatMs mirrors SEAT= below
   try {
     if (st === 0) { const ir = await send('INIT'); if(!ir.ok){ log('arm failed: '+ir.rest,'log-err'); return; } await delay(200); }
     const r = await send(`RUN LIFT=${target} FINAL=${target} SEAT=500 HOLD=${hold} RAMPUP=${ramp} RAMPDOWN=${ramp}`);
@@ -776,6 +822,8 @@ $('volSlider').onchange = e => cmd('AUDIO_VOL '+e.target.value,'volume');
 
 // ================= wire up =================
 $('btnConnect').onclick = () => (port ? disconnect() : connect());
+setHighSpeedMode(highSpeedMode);
+$('hsMode').onchange = e => setHighSpeedMode(e.target.checked, { persist:true });
 $('btnPower').onclick = doPower;
 $('btnGatePower').onclick = doPower;
 $('btnGateConnect').onclick = () => (port ? disconnect() : connect());
@@ -790,6 +838,12 @@ $('btnHome').onclick = () => cmd('HOME','home');
 $('btnDoorStop').onclick = () => cmd('DOOR_STOP','door stop');
 $('btnDbgLock').onclick = () => cmd('LOCK','lock');
 $('btnDbgUnlock').onclick = () => cmd('UNLOCK','unlock');
+$('btnCalStart').onclick = () => cmd('CAL_START','esc calibration start');
+$('btnCalStop').onclick = () => cmd('CAL_STOP','esc calibration stop');
+$('btnCalStatus').onclick = () => cmd('CAL_STATUS','esc calibration status');
+$('btnProfileSpin').onclick = () => cmd('PROFILE_SPIN','esc profile spin');
+$('btnProfileCrawl').onclick = () => cmd('PROFILE_CRAWL','esc profile crawl');
+$('btnTuneStatus').onclick = () => cmd('TUNE_STATUS','esc tune status');
 $('btnRaw').onclick = async () => { const c=$('rawCmd').value.trim(); if(c){ await cmd(c); $('rawCmd').value=''; } };
 $('rawCmd').onkeydown = e => { if (e.key==='Enter') $('btnRaw').click(); };
 $('btnClearLog').onclick = () => $('log').innerHTML='';

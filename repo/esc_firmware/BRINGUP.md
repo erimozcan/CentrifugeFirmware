@@ -56,13 +56,55 @@ two-way controller, or type them yourself).
 | 9 | `s`, then `v 20`,`v 50`,...`v 67`+ | smooth bounded ramps toward >4000 RPM | any runaway/oscillation/winding warmth -> `s` then `x`, cut PSU |
 
 ## Notes / open items for higher speed
+- Default firmware remains capped at 4000 RPM. Build both ESC and master with
+  `-D HIGH_SPEED_SENSORLESS=1` only for contained validation runs.
+- High-speed validation is staged: first prove encoder FOC to 4000 RPM, then
+  inspect observer shadow telemetry (`obs_rpm`, `obs_lock`, `phase_err`) before
+  commanding handoff above the crossover.
+- First sensorless trials should use the 3 A observer current trip and step
+  through 5000, 7000, 9000, then 10000 RPM unloaded before testing the full rotor.
 - **6 V (VBUS/2) cap** is required for clean low-side CS but limits top speed; a
   1100 KV motor's BEMF approaches the modulation limit well below 13k RPM.
   For higher RPM raise the **bus voltage**, do NOT relax the VBUS/2 cap.
   `MOTOR_VOLT_LIMIT` starts at 3 V; raise toward VBUS/2 as you go faster.
-  DONE (2026-07): moved to the 24 V bus and validated the high-speed regime to
-  7000 RPM on the bench; master firmware cap raised 4000 → 7000.
 - `zero_electric_angle` is NOT reproducible across power cycles (incremental
   encoder, Z/PB8 unused). Per-boot `initFOC` is correct; never hardcode it.
   `foc_ready` latches after first arm -> RESET the board between stage-4 trials.
 - Recovery after any abort: `x` then `0`; reset board before re-arming stage 4.
+
+## Manual service calibration
+
+Calibration is explicit service mode only. It does not run at boot and it is not
+part of a normal run. Use it only with the rotor contained and the PSU current
+limited, because the ESC will align, twitch, and ramp through low-speed targets.
+
+Master/UI commands:
+
+| Command | ESC verb | Purpose |
+|---|---|---|
+| `CAL_START` | `CAL START` | Starts calibration while the master is stopped/safe |
+| `CAL_STOP` | `CAL STOP` | Aborts calibration and disarms the ESC |
+| `CAL_STATUS` | `CAL STATUS?` | Requests calibration status from the ESC |
+| `CAL_APPLY` | `CAL APPLY` | Applies the conservative spin profile; does not save to flash |
+| `PROFILE_SPIN` | `PROFILE SPIN` | Stable normal spin/high-speed profile |
+| `PROFILE_CRAWL` | `PROFILE CRAWL` | Stronger low-speed tube-index/crawl profile |
+| `TUNE_STATUS` | `TUNE?` | Prints current ESC-owned PID/current gains |
+
+Calibration states:
+`CAL_IDLE`, `CAL_ALIGN`, `CAL_ENCODER_CHECK`, `CAL_CURRENT_CHECK`,
+`CAL_LOW_SPEED_PID`, `CAL_OBSERVER_SHADOW`, `CAL_DONE`, `CAL_FAILED`.
+
+Behavior:
+
+- `CAL_ALIGN` runs SimpleFOC alignment from the encoder and records the normal
+  `zero_electric_angle` / `sensor_direction` result.
+- `CAL_ENCODER_CHECK` verifies the ABI count is stable at rest and direction is
+  known.
+- `CAL_CURRENT_CHECK` samples current at rest.
+- `CAL_LOW_SPEED_PID` steps 500, 1000, 2000, 3000, and 4000 RPM using encoder
+  FOC only and records tracking error/current.
+- In high-speed builds only, `CAL_OBSERVER_SHADOW` runs the observer in shadow
+  and reports `obs_rpm`, `obs_lock`, and `phase_err`; it never hands off to
+  sensorless during calibration.
+- The first implementation reports observed values and suggestions; it does not
+  permanently save aggressive gains.

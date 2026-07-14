@@ -1,5 +1,7 @@
 #include "state_machine.h"
 
+#include <string.h>
+
 #include "hardware_guard.h"
 #include "motor_interface.h"
 
@@ -7,6 +9,10 @@ namespace {
 
 bool timeReached(uint32_t nowMs, uint32_t deadlineMs) {
   return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
+}
+
+int32_t abs32(int32_t value) {
+  return value < 0 ? -value : value;
 }
 
 bool hallActive(uint8_t raw, bool activeLow) {
@@ -47,6 +53,56 @@ void sanitizeProfile(RunProfile &profile) {
   profile.rampDownMs = clampDuration(static_cast<int32_t>(profile.rampDownMs));
 }
 
+bool isEscCalibrationActive(const SystemContext &ctx) {
+  return strcmp(ctx.escCalState, "idle") != 0 &&
+         strcmp(ctx.escCalState, "done") != 0 &&
+         strcmp(ctx.escCalState, "failed") != 0;
+}
+
+bool isRunFanState(SystemState state) {
+  switch (state) {
+    case STATE_RUN_CLOSING:
+    case STATE_RUN_RELEASE:
+    case STATE_PRE_RUN_VERIFY:
+    case STATE_LIFT_RAMP:
+    case STATE_SEAT_HOLD:
+    case STATE_MAIN_RAMP:
+    case STATE_SPIN_HOLD:
+    case STATE_STOPPING:
+    case STATE_RUN_SETTLE:
+    case STATE_RUN_INDEX:
+    case STATE_RUN_ENGAGE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool isRotateFanState(SystemState state) {
+#if FAN_RUNS_DURING_ROTATE
+  return state == STATE_ROTATE_RELEASE ||
+         state == STATE_ROTATE_MOVING ||
+         state == STATE_ROTATE_ENGAGE;
+#else
+  (void)state;
+  return false;
+#endif
+}
+
+bool isFanDemandActive(const SystemContext &ctx) {
+  if (isRunFanState(ctx.state) || isRotateFanState(ctx.state)) {
+    return true;
+  }
+
+#if FAN_RUNS_DURING_ESC_CAL
+  if (isEscCalibrationActive(ctx)) {
+    return true;
+  }
+#endif
+
+  return abs32(ctx.rpm1) >= FAN_RPM_ACTIVE_THRESHOLD;
+}
+
 }  // namespace
 
 void StateMachine::begin(SystemContext &ctx, uint32_t nowMs) {
@@ -55,12 +111,23 @@ void StateMachine::begin(SystemContext &ctx, uint32_t nowMs) {
   ctx.state = STATE_BOOT;
   ctx.fault = FAULT_NONE;
   ctx.faultLatched = false;
+  fanDemandPreviously_ = false;
+  fanCooldownUntilMs_ = nowMs;
 
   ctx.rpmInternal = 0;
   ctx.rpmInternalTarget = 0;
   ctx.rampStepInternal = 0;
   ctx.rpmCmd = 0;
   ctx.rpm1 = 0;
+  strncpy(ctx.escCalState, "idle", sizeof(ctx.escCalState) - 1U);
+  ctx.escCalState[sizeof(ctx.escCalState) - 1U] = '\0';
+  ctx.escCalStep = 0;
+  ctx.escCalTargetRpm = 0;
+  ctx.escCurrentCentiamps = 0;
+  ctx.escObserverRpm = 0;
+  ctx.escObserverLock = 0U;
+  ctx.escPhaseErrDeg10 = 0;
+  ctx.escLoopHz = 0U;
 
   ctx.stateEntryMs = nowMs;
   ctx.seatDeadlineMs = nowMs;
@@ -103,6 +170,15 @@ void StateMachine::tick(
     HardwareGuard &guard,
     uint32_t nowMs) {
   ctx.rpm1 = sensorSnapshot.rpm1;
+  strncpy(ctx.escCalState, sensorSnapshot.escCalState, sizeof(ctx.escCalState) - 1U);
+  ctx.escCalState[sizeof(ctx.escCalState) - 1U] = '\0';
+  ctx.escCalStep = sensorSnapshot.escCalStep;
+  ctx.escCalTargetRpm = sensorSnapshot.escCalTargetRpm;
+  ctx.escCurrentCentiamps = sensorSnapshot.escCurrentCentiamps;
+  ctx.escObserverRpm = sensorSnapshot.escObserverRpm;
+  ctx.escObserverLock = sensorSnapshot.escObserverLock;
+  ctx.escPhaseErrDeg10 = sensorSnapshot.escPhaseErrDeg10;
+  ctx.escLoopHz = sensorSnapshot.escLoopHz;
   updateInterlockState(ctx, sensorSnapshot);
 
   PendingCommand pendingLocal;
@@ -145,7 +221,7 @@ void StateMachine::tick(
   }
 
   updateDoorMotorControl(ctx, nowMs);
-  updateFanControl(ctx);
+  updateFanControl(ctx, nowMs);
 
   motor.setCommandOutputEnabled(ctx.commandOutputEnabled);
   bool indexingState = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_RUN_INDEX);
@@ -592,9 +668,25 @@ void StateMachine::updateDoorMotorControl(SystemContext &ctx, uint32_t nowMs) {
   }
 }
 
-void StateMachine::updateFanControl(SystemContext &ctx) {
-  // No thermistor fitted: the fan simply runs whenever the device is powered on.
-  ctx.fanEnabled = ctx.devicePowered;
+void StateMachine::updateFanControl(SystemContext &ctx, uint32_t nowMs) {
+  // POWER_OFF is authoritative: no run/cooldown/calibration demand may keep the fan on.
+  if (!ctx.devicePowered) {
+    fanDemandPreviously_ = false;
+    fanCooldownUntilMs_ = nowMs;
+    ctx.fanEnabled = false;
+    return;
+  }
+
+  bool fanDemand = isFanDemandActive(ctx);
+  if (fanDemand) {
+    fanCooldownUntilMs_ = nowMs + FAN_COOLDOWN_MS;
+  } else if (fanDemandPreviously_) {
+    fanCooldownUntilMs_ = nowMs + FAN_COOLDOWN_MS;
+  }
+
+  fanDemandPreviously_ = fanDemand;
+  bool cooldownActive = !timeReached(nowMs, fanCooldownUntilMs_);
+  ctx.fanEnabled = fanDemand || cooldownActive;
 }
 
 bool StateMachine::isRunInterlockSafe(const SystemContext &ctx) const {

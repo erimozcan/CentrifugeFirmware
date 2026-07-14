@@ -59,6 +59,18 @@ bool isDoorControlState(SystemState state) {
   return state == STATE_BOOT || state == STATE_SAFE_IDLE;
 }
 
+bool isEscServiceState(const SystemContext &ctx) {
+  return (ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE) &&
+         ctx.rpmCmd < SAFE_UNLOCK_RPM &&
+         ctx.rpm1 < SAFE_UNLOCK_RPM;
+}
+
+void forwardEscServiceCommand(int32_t seq, const char *line) {
+  Serial1.print(line);
+  Serial1.print('\n');
+  Protocol::sendOk(seq, "FWD=1");
+}
+
 }  // namespace
 
 void CommandInterface::begin() {
@@ -119,6 +131,69 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
 
   if (strcmp(cmdToken, "STATUS") == 0) {
     Protocol::sendStatus(seq, ctx);
+    return;
+  }
+
+  if (strcmp(cmdToken, "CAL_START") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "CAL START");
+    return;
+  }
+
+  if (strcmp(cmdToken, "CAL_STOP") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "CAL STOP");
+    return;
+  }
+
+  if (strcmp(cmdToken, "CAL_STATUS") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "CAL STATUS?");
+    return;
+  }
+
+  if (strcmp(cmdToken, "CAL_APPLY") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "CAL APPLY");
+    return;
+  }
+
+  if (strcmp(cmdToken, "PROFILE_SPIN") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "PROFILE SPIN");
+    return;
+  }
+
+  if (strcmp(cmdToken, "PROFILE_CRAWL") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "PROFILE CRAWL");
+    return;
+  }
+
+  if (strcmp(cmdToken, "TUNE_STATUS") == 0 || strcmp(cmdToken, "TUNE?") == 0) {
+    if (!isEscServiceState(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    forwardEscServiceCommand(seq, "TUNE?");
     return;
   }
 

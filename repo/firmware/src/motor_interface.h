@@ -35,6 +35,14 @@ class MotorInterface {
   uint8_t arrivedTube() const;            // tube nearest the current angle (1..N; 0 if not homed)
 
   int32_t lastMeasuredRpm() const;   // actual RPM parsed from ESC ST telemetry
+  void copyEscCalState(char *out, size_t maxLen) const;
+  int32_t escCalStep() const { return escCalStep_; }
+  int32_t escCalTargetRpm() const { return escCalTargetRpm_; }
+  int32_t escCurrentCentiamps() const { return escCurrentCentiamps_; }
+  int32_t escObserverRpm() const { return escObserverRpm_; }
+  uint8_t escObserverLock() const { return escObserverLock_; }
+  int32_t escPhaseErrDeg10() const { return escPhaseErrDeg10_; }
+  uint32_t escLoopHz() const { return escLoopHz_; }
 
  private:
   enum EscIntent { INTENT_IDLE = 0, INTENT_SPIN, INTENT_ESTOP };
@@ -48,11 +56,19 @@ class MotorInterface {
   uint32_t lastTxMs_ = 0U;
 
   // RX (ESC -> Due) line assembly + parsed telemetry. Sized for the ESC's long bench STAT
-  // line (rev=/ang=/cnt= + phase currents, ~130 chars), which the rotate loop reads.
-  char rxBuf_[160];
+  // line and the service ST line with calibration/observer fields.
+  char rxBuf_[256];
   uint8_t rxLen_ = 0U;
   int32_t measuredRpm_ = 0;
   uint32_t lastRxMs_ = 0U;
+  char escCalState_[18];
+  int32_t escCalStep_ = 0;
+  int32_t escCalTargetRpm_ = 0;
+  int32_t escCurrentCentiamps_ = 0;
+  int32_t escObserverRpm_ = 0;
+  uint8_t escObserverLock_ = 0U;
+  int32_t escPhaseErrDeg10_ = 0;
+  uint32_t escLoopHz_ = 0U;
 
   // Indexing state (ROTATE_VIA_INDEX)
   bool indexActive_ = false;         // an INDEX has been issued and not yet finished

@@ -19,11 +19,17 @@
 #define MAX_TICK_CATCHUP 4U
 
 #define RPM_SCALE 1000
-// Operating ceiling the Nano will command. Was 4000 (the Phase-A closed-loop
-// validation ceiling on the 12 V bench supply; the ESC crosses into its
-// high-speed regime above CROSSOVER_RPM=4000). Raised to 7000 after the move
-// to the 24 V bus and bench validation of the high-speed regime (2026-07).
-#define MAX_RPM_BAREBONES 7000
+// Closed-loop operating ceiling the Nano will command. Default builds stay at the
+// validated 4000 RPM encoder-FOC ceiling. Only high-speed validation builds may
+// command the ESC's sensorless observer handoff path.
+#ifndef HIGH_SPEED_SENSORLESS
+#define HIGH_SPEED_SENSORLESS 0
+#endif
+#if HIGH_SPEED_SENSORLESS
+#define MAX_RPM_BAREBONES 10000
+#else
+#define MAX_RPM_BAREBONES 4000
+#endif
 #define SAFE_UNLOCK_RPM 50
 
 // ===========================================================================
@@ -245,6 +251,13 @@
 // Motor direction vs the door mechanism. Set to 1 if OPEN/CLOSE drive the wrong way
 // (swaps the DRV8871 outputs in firmware instead of rewiring OUT1/OUT2).
 #define DOOR_DIR_INVERT   1
+
+// Fan control: normal firmware drives the fan full-speed only while there is
+// motor activity, then holds it on for a cooldown. POWER_OFF still forces it off.
+#define FAN_COOLDOWN_MS           60000U
+#define FAN_RPM_ACTIVE_THRESHOLD  100
+#define FAN_RUNS_DURING_ROTATE    1
+#define FAN_RUNS_DURING_ESC_CAL   1
 
 // NTC (100k divider) thresholds in raw ADC counts (12-bit ADC)
 // Lower ADC == hotter for pullup-divider wiring.

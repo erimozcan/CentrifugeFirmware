@@ -29,6 +29,14 @@ uint32_t g_lastTickUs = 0U;
 void updateSharedSensors() {
   SensorData latest;
   latest.rpm1 = g_motor.lastMeasuredRpm();
+  g_motor.copyEscCalState(latest.escCalState, sizeof(latest.escCalState));
+  latest.escCalStep = g_motor.escCalStep();
+  latest.escCalTargetRpm = g_motor.escCalTargetRpm();
+  latest.escCurrentCentiamps = g_motor.escCurrentCentiamps();
+  latest.escObserverRpm = g_motor.escObserverRpm();
+  latest.escObserverLock = g_motor.escObserverLock();
+  latest.escPhaseErrDeg10 = g_motor.escPhaseErrDeg10();
+  latest.escLoopHz = g_motor.escLoopHz();
   latest.lockSensor = (digitalRead(PIN_LOCK_SENSOR) == HIGH) ? 1U : 0U;
   latest.doorOpenHall = (digitalRead(PIN_DOOR_OPEN_HALL) == HIGH) ? 1U : 0U;
   latest.doorClosedHall = (digitalRead(PIN_DOOR_CLOSED_HALL) == HIGH) ? 1U : 0U;
@@ -75,6 +83,15 @@ void setup() {
 
   noInterrupts();
   g_sensorShared.rpm1 = 0;
+  strncpy(g_sensorShared.escCalState, "idle", sizeof(g_sensorShared.escCalState) - 1U);
+  g_sensorShared.escCalState[sizeof(g_sensorShared.escCalState) - 1U] = '\0';
+  g_sensorShared.escCalStep = 0;
+  g_sensorShared.escCalTargetRpm = 0;
+  g_sensorShared.escCurrentCentiamps = 0;
+  g_sensorShared.escObserverRpm = 0;
+  g_sensorShared.escObserverLock = 0U;
+  g_sensorShared.escPhaseErrDeg10 = 0;
+  g_sensorShared.escLoopHz = 0U;
   g_sensorShared.lockSensor = 0U;
   g_sensorShared.doorOpenHall = 0U;
   g_sensorShared.doorClosedHall = 0U;

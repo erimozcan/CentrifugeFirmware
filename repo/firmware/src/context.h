@@ -115,6 +115,14 @@ struct PendingCommand {
 
 struct SensorData {
   int32_t rpm1;
+  char escCalState[18];
+  int32_t escCalStep;
+  int32_t escCalTargetRpm;
+  int32_t escCurrentCentiamps;
+  int32_t escObserverRpm;
+  uint8_t escObserverLock;
+  int32_t escPhaseErrDeg10;
+  uint32_t escLoopHz;
   uint8_t lockSensor;
   uint8_t doorOpenHall;
   uint8_t doorClosedHall;
@@ -131,6 +139,14 @@ struct SystemContext {
   int32_t rampStepInternal;
   int32_t rpmCmd;
   int32_t rpm1;
+  char escCalState[18];
+  int32_t escCalStep;
+  int32_t escCalTargetRpm;
+  int32_t escCurrentCentiamps;
+  int32_t escObserverRpm;
+  uint8_t escObserverLock;
+  int32_t escPhaseErrDeg10;
+  uint32_t escLoopHz;
 
   RunProfile activeProfile;
 
