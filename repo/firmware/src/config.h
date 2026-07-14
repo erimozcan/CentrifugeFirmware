@@ -19,11 +19,11 @@
 #define MAX_TICK_CATCHUP 4U
 
 #define RPM_SCALE 1000
-// Closed-loop operating ceiling the Nano will command. Phase A runs the full
-// closed-loop range 0..4000 RPM (the ESC crosses into open-loop only ABOVE this,
-// so staying <= 4000 keeps the whole run in encoder-closed-loop). Raise later
-// once the open-loop high-speed regime is validated on the final 6S supply.
-#define MAX_RPM_BAREBONES 4000
+// Operating ceiling the Nano will command. Was 4000 (the Phase-A closed-loop
+// validation ceiling on the 12 V bench supply; the ESC crosses into its
+// high-speed regime above CROSSOVER_RPM=4000). Raised to 7000 after the move
+// to the 24 V bus and bench validation of the high-speed regime (2026-07).
+#define MAX_RPM_BAREBONES 7000
 #define SAFE_UNLOCK_RPM 50
 
 // ===========================================================================

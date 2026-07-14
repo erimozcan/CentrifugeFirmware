@@ -73,11 +73,12 @@ pio run -d repo/esc_firmware -t upload
 
 ## Known limits
 
-- At the 12 V bench supply the motor tops out ~5–6k RPM (BEMF vs VBUS/2);
-  4000 RPM is the comfortable validated ceiling.
-- The open-loop >4000 RPM regime in the source (`CROSSOVER_RPM`..10k) is
-  **untuned and unvalidated** — do not use it without containment and the
-  intended 24 V supply.
+- The device now runs on the intended **24 V bus**; operation up to **7000 RPM**
+  was validated on the bench (2026-07), and the master firmware cap
+  (`MAX_RPM_BAREBONES`) is set to 7000 accordingly.
+- Historical: at the original 12 V bench supply the motor topped out ~5–6k RPM
+  (BEMF vs VBUS/2) and 4000 RPM was the validated ceiling. Do NOT command the
+  >`CROSSOVER_RPM` (4000) regime on a 12 V supply.
 
 `dashboard/` is a standalone ESC-only development dashboard (FastAPI +
 pyserial against the ESC's own USB serial) from the spindle bring-up phase; it

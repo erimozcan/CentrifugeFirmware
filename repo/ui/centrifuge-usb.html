@@ -322,8 +322,9 @@
     <section class="panel">
       <h2>Centrifuge <span class="statechip" id="runChip">—</span></h2>
       <div class="sub">Set the speed and time, then run. Arming is automatic.</div>
+      <div id="runTimer" style="display:none;font:600 13px var(--mono);color:var(--accent2);margin-top:2px"></div>
       <div class="fields">
-        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="4000" step="100"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 4000</span></label>
+        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="7000" step="100"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 7000</span></label>
         <label class="field">Time<input type="number" id="inTime" value="10" min="0" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds hold</span></label>
         <label class="field">Ramp<input type="number" id="inRamp" value="10" min="1" max="120"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds</span></label>
       </div>
@@ -417,6 +418,13 @@ const BAUD = 115200;
 let port=null, reader=null, writer=null, keepReading=false, seq=0, rxBuf='';
 const pending = new Map();
 let lastStatus = null;
+
+// Live run countdown. STATUS carries no clock, so timing is client-side: each phase is
+// anchored on the state transition seen by the poll, and the nominal durations come from
+// the profile doRun() sent. If the page (re)loads mid-run the profile is unknown -> show
+// elapsed time in the phase instead of a countdown.
+let runProfile = null;                 // {rampMs, seatMs, holdMs} of the last RUN we issued
+let runPhase = null, runPhaseT0 = 0;
 
 const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN RAMP','SPIN HOLD','STOPPING','HARD STOP','FAULT',
   'CLOSING','UNLOCKING','SETTLING','LOCKING','OPENING',      // 10-14 run cycle
@@ -602,6 +610,7 @@ function render(f) {
   if (!f) {
     $('rpmActual').textContent='—'; $('rpmTarget').textContent='—'; $('stateName').textContent='—';
     $('rpmBar').style.width='0'; $('sceneText').textContent='Offline';
+    $('runTimer').style.display='none';
     $('scenePill').className='scenePill'; $('btnClear').style.display='none';
     $('metaTube').textContent='Tube —'; $('metaDoor').textContent='Door —'; $('metaLock').textContent='Lock —';
     chip($('doorChip'),'—'); chip($('tubeChip'),'—'); chip($('runChip'),'—'); chip($('audioChip'),'—');
@@ -614,7 +623,7 @@ function render(f) {
   $('rpmActual').textContent = (f.RPM1 ?? 0);
   $('rpmTarget').textContent = (f.RPM_CMD ?? 0);
   $('stateName').textContent = STATE_NAMES[st] || ('state '+st);
-  $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/4000)*100,0,100) + '%';
+  $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/7000)*100,0,100) + '%';
   $('btnClear').style.display = (f.FAULT ? '' : 'none');
 
   const locked = (f.LOCKCMD ?? f.LOCK) ? true : false;
@@ -644,6 +653,7 @@ function render(f) {
        running?'run':st===1?'good':'');
   $('btnRun').disabled   = !(st===0 || st===1);
   $('btnAbort').disabled = !(st===6 || st===7);
+  updateRunTimer(st);
 
   // ---- debug: audio + telemetry ----
   chip($('audioChip'), f.AUDIO ? 'ready' : 'no module', f.AUDIO?'good':'bad');
@@ -664,6 +674,32 @@ function render(f) {
 
   updatePower(f);
 }
+
+// ---- live run countdown ----
+// Phases: ramp-up = LIFT RAMP(3) + SEAT HOLD(4) + MAIN RAMP(5) (nominal RAMPUP + seat dwell);
+// hold = SPIN HOLD(6) (nominal HOLD); stop = STOPPING(7) (nominal RAMPDOWN, which doRun
+// sends equal to RAMPUP). Countdowns round up so "0:01 left" holds until the phase ends.
+function updateRunTimer(st){
+  const phase = st===6 ? 'hold' : st===7 ? 'stop' : (st>=3 && st<=5) ? 'ramp' : null;
+  if (phase !== runPhase) { runPhase = phase; runPhaseT0 = Date.now(); }
+  const el = $('runTimer');
+  if (!phase) { el.style.display='none'; return; }
+  const label = phase==='hold' ? 'At speed' : phase==='ramp' ? 'Ramping up' : 'Stopping';
+  const mmss = s => Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+  const elapsed = Date.now() - runPhaseT0;
+  let text;
+  if (runProfile) {
+    const total = phase==='hold' ? runProfile.holdMs
+                : phase==='ramp' ? runProfile.rampMs + runProfile.seatMs
+                : runProfile.rampMs;
+    text = label + ' · ' + mmss(Math.ceil(Math.max(0, total - elapsed)/1000)) + ' left';
+  } else {
+    text = label + ' · ' + mmss(Math.floor(elapsed/1000)) + ' elapsed';
+  }
+  el.style.display = ''; el.textContent = text;
+}
+// Tick between polls so the seconds count down smoothly.
+setInterval(() => { if (lastStatus) updateRunTimer(lastStatus.STATE ?? 0); }, 200);
 
 // ---- door glyph (simple animated box + lid) ----
 function drawDoor(f) {
@@ -715,9 +751,10 @@ function updatePower(f){ const on=!!(f&&f.POWER);
 
 async function doRun(){
   const f = lastStatus || {}; const st = f.STATE ?? 0;
-  const target = clamp(+$('inRpm').value||0, 0, 4000);
+  const target = clamp(+$('inRpm').value||0, 0, 7000);
   const hold = Math.max(0, +$('inTime').value||0) * 1000;
   const ramp = Math.max(1, +$('inRamp').value||1) * 1000;
+  runProfile = { rampMs: ramp, seatMs: 500, holdMs: hold };   // seatMs mirrors SEAT= below
   try {
     if (st === 0) { const ir = await send('INIT'); if(!ir.ok){ log('arm failed: '+ir.rest,'log-err'); return; } await delay(200); }
     const r = await send(`RUN LIFT=${target} FINAL=${target} SEAT=500 HOLD=${hold} RAMPUP=${ramp} RAMPDOWN=${ramp}`);

@@ -60,6 +60,8 @@ two-way controller, or type them yourself).
   1100 KV motor's BEMF approaches the modulation limit well below 13k RPM.
   For higher RPM raise the **bus voltage**, do NOT relax the VBUS/2 cap.
   `MOTOR_VOLT_LIMIT` starts at 3 V; raise toward VBUS/2 as you go faster.
+  DONE (2026-07): moved to the 24 V bus and validated the high-speed regime to
+  7000 RPM on the bench; master firmware cap raised 4000 → 7000.
 - `zero_electric_angle` is NOT reproducible across power cycles (incremental
   encoder, Z/PB8 unused). Per-boot `initFOC` is correct; never hardcode it.
   `foc_ready` latches after first arm -> RESET the board between stage-4 trials.
