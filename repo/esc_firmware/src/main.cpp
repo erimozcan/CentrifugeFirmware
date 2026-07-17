@@ -696,6 +696,14 @@ static void linkIndex(int tube) {
     abortCalibration("superseded", CAL_IDLE);
   }
   tube = ((tube % TUBE_COUNT) + TUBE_COUNT) % TUBE_COUNT;
+  // A re-sent INDEX for the SAME tube while the move/hold is live is a KEEP-ALIVE, not
+  // a restart: the master re-sends until arrival (dropped-line robustness), and
+  // restarting the crawl each time races the settle dwell so arrival never latches
+  // (bench: post-run RUN_INDEX timed out -> latched fault).
+  if (index_mode && armed && tube == index_tube) {
+    Serial.print("OK INDEX "); Serial.println(tube);
+    return;
+  }
   index_tube = tube;
   // Refuse to enter a position move while the rotor is actually turning -- an index
   // is only ever valid from rest (the master sequences lock release around it).

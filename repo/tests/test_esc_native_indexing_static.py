@@ -36,6 +36,14 @@ def test_esc_index_uses_crawl_torque_and_restores_spin_profile():
     assert "applyPidProfile(SPIN_PROFILE)" in disarm_body
 
 
+def test_esc_index_resend_is_keepalive_not_restart():
+    src = read(ESC_MAIN)
+    # The master re-sends INDEX until arrival; a restart per re-send races the settle
+    # dwell and arrival never latches (bench: RUN_INDEX timeout -> latched fault).
+    index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
+    assert "index_mode && armed && tube == index_tube" in index_body
+
+
 def test_esc_index_refuses_while_rotor_moving():
     src = read(ESC_MAIN)
     index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
