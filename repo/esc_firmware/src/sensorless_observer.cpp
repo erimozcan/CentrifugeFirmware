@@ -75,7 +75,12 @@ void SensorlessObserver::update(float ia, float ib, float ic,
   bemfVolts_ = sqrtf(eAlpha * eAlpha + eBeta * eBeta);
 
   const float speedSign = (electricalOmega_ >= 0.0f) ? 1.0f : -1.0f;
-  const float measuredElectricalAngle = normalizeAngle(atan2f(eBeta, eAlpha) - speedSign * (kPi * 0.5f));
+  // Advance the raw estimate by the fixed pipeline latency (see cfg.latencySec): the
+  // currents/voltages that produced this BEMF vector are ~latencySec old, so the rotor
+  // has already moved on by omega * latency. Without this the estimate lags the true
+  // angle proportionally to speed and the lock gate can never close at high RPM.
+  const float measuredElectricalAngle = normalizeAngle(
+      atan2f(eBeta, eAlpha) - speedSign * (kPi * 0.5f) + electricalOmega_ * cfg_.latencySec);
   const float pllError = wrapPi(measuredElectricalAngle - electricalAngle_);
 
   electricalOmega_ += cfg_.pllKi * pllError * dt;

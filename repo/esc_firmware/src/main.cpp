@@ -105,6 +105,9 @@
 #define SENSORLESS_LOCK_RPM_ERR     300.0f
 #define SENSORLESS_MIN_BEMF_V       1.0f
 #define SENSORLESS_TRIAL_CURRENT_A  5.0f
+#define SENSORLESS_LATENCY_SEC      240e-6f  // measurement-pipeline delay, bench-fitted
+                                             // 2026-07-17 (39deg@3800/44.8@4500/49.2@5000
+                                             // == constant ~240 us); see observer cfg
 #define MOTOR_PHASE_RESISTANCE_OHM  0.32f
 #define MOTOR_PHASE_INDUCTANCE_H    0.000010f
 
@@ -116,9 +119,31 @@
 // lock taper pin give the final precision within a detent. Verb: `INDEX <0-3>`.
 #define TUBE_COUNT        4
 #define TUBE_STEP_RAD     (REV / TUBE_COUNT)    // 90 deg per tube (direct 1:1 drive)
-#define INDEX_VEL_LIMIT   (1.0f * REV)          // slow, controlled index move (1 rev/s)
-#define INDEX_TOL_RAD     0.035f                // ~2 deg arrival tolerance
-#define INDEX_P_ANGLE     10.0f                 // position-loop P gain (gentle)
+// INDEX is a VELOCITY-mode crawl, not a position servo: a position loop closed through
+// this assembly's stiction limit-cycles (torque winds up, breaks away, overshoots,
+// reverses -- observed on the bench 2026-07-17). The crawl recipe is the one PROVEN on
+// this machine by the Nano-side rotate, but run at the FOC loop rate (vs 25 Hz polling)
+// and bidirectional: approach fast, creep near the target, cut drive a hair EARLY
+// (stop lead absorbs the stop coast), verify SETTLED, then correction passes (can back
+// up!) until within tolerance. The detent + lock taper do the final capture.
+#define INDEX_FAST_RADPS    (0.67f * REV)       // ~40 RPM approach outside the coarse zone
+#define INDEX_SLOW_RADPS    (0.25f * REV)       // ~15 RPM precision creep
+#define INDEX_COARSE_RAD    (0.11f * REV)       // creep inside this distance (~40 deg)
+#define INDEX_STOP_LEAD_RAD (0.008f * REV)      // cut drive ~3 deg early; coast covers it
+#define INDEX_DONE_TOL_RAD  (0.014f * REV)      // accept within ~5 deg (lock capture is 10-20)
+#define INDEX_SETTLE_VEL    (0.10f * REV)       // "stopped" = below ~6 RPM. NOT lower: the
+                                                // 4000 CPR encoder's velocity quantization
+                                                // spikes ~3 RPM at rest, which kept
+                                                // restarting the settle dwell (bench)
+#define INDEX_SETTLE_MS     200U                // ... sustained this long
+#define INDEX_MAX_RETRIES   6                   // bounded correction passes
+#define INDEX_STALL_MS      200U                // approach not moving this long -> stiction kick
+#define INDEX_KICK_MS        40U                // kick is a bounded PULSE at FAST (P=1.5 x
+                                                // 4.2 rad/s err ~ 6 A -> clamps at current
+                                                // limit -> breaks away), then back to the
+                                                // creep -- a continuous kick overshoots and
+                                                // ping-pongs the retry budget away (bench)
+#define INDEX_P_ANGLE     10.0f                 // position-loop P gain (angle mode unused by INDEX now)
 #define MOTOR_VEL_LIMIT   (200.0f * REV)        // spin velocity ceiling (restored after index)
 
 // MB1419C current sense: 3 mOhm shunt, gain -64/7 (forum-confirmed for Rev C).
@@ -187,6 +212,7 @@ static float g_observer_phase_err = 0.0f;
 static float g_observer_rpm = 0.0f;
 static float g_observer_bemf = 0.0f;
 static float g_last_current_a = 0.0f;
+static float g_vbus_boot = 0.0f;     // bus voltage measured once in setup() (see comment there)
 static SensorlessObserver observer;
 
 struct PidProfile {
@@ -199,6 +225,11 @@ struct PidProfile {
 };
 
 static const PidProfile SPIN_PROFILE  = {"spin",  0.05f, 0.10f, 0.15f, 0.3f, 20.0f};
+// CRAWL gains are the Nano-crawl-proven stable set -- do NOT raise I for re-breakaway:
+// bench 2026-07-17 tried I=3.0 and the velocity loop went unstable against the 0.15 s
+// velocity filter (holds wandered, moves oscillated). Stiction re-breakaway is handled
+// DETERMINISTICALLY by the index state machine's stall kick instead (same recipe as the
+// door motor: brief FAST command until motion starts, then back to the creep).
 static const PidProfile CRAWL_PROFILE = {"crawl", 1.50f, 0.10f, 0.15f, 0.3f, 20.0f};
 static const PidProfile *active_pid_profile = &SPIN_PROFILE;
 
@@ -236,11 +267,17 @@ static const uint8_t CAL_RPM_STEP_COUNT = sizeof(CAL_RPM_STEPS) / sizeof(CAL_RPM
 #define CAL_ENCODER_STILL_COUNTS    200
 #define CAL_RPM_ERROR_LIMIT         800.0f
 
-// ----- gantry indexing (angle-control position move) ------------------------
-static bool  index_mode    = false;  // true = closed-loop angle move/hold to a tube
-static bool  index_arrived = false;  // reached the target angle (within tolerance)
+// ----- gantry indexing (velocity-crawl position move) ------------------------
+enum IndexPhase { IDX_APPROACH = 0, IDX_SETTLE, IDX_HOLD };
+static bool  index_mode    = false;  // true = crawl move/hold to a tube in progress
+static bool  index_arrived = false;  // settled within tolerance (or retries exhausted)
 static int   index_tube    = 0;      // last commanded tube (0..TUBE_COUNT-1)
 static float index_target  = 0.0f;   // target cumulative angle (rad)
+static IndexPhase idx_phase = IDX_APPROACH;
+static uint8_t  idx_retries = 0;     // correction passes taken this move
+static uint32_t idx_settle_ms = 0;   // settle-dwell start
+static uint32_t idx_stall_ms = 0;    // last time the approach was actually moving
+static uint32_t idx_kick_until = 0;  // active stiction-kick pulse deadline (0 = none)
 
 static float cmd_vel   = 0.0f;       // requested final velocity (rad/s)
 static float ramp_vel  = 0.0f;       // ramped setpoint actually commanded
@@ -544,7 +581,8 @@ static void printST() {
   Serial.print(" obs_rpm="); Serial.print(g_observer_rpm, 0);
   Serial.print(" obs_lock="); Serial.print(observer.locked() ? 1 : 0);
   Serial.print(" phase_err="); Serial.print(g_observer_phase_err * 180.0f / _PI, 1);
-  Serial.print(" bus=");     Serial.print(SUPPLY_VOLTAGE, 1);
+  Serial.print(" bus=");     Serial.print(g_vbus_boot, 1);      // MEASURED at boot (A_VBUS)
+  Serial.print(" buscfg=");  Serial.print(SUPPLY_VOLTAGE, 1);   // compiled-in assumption
   Serial.print(" ilim=");    Serial.print(motor.current_limit, 2);
   Serial.print(" pos=");     Serial.print(encoder.getMechanicalAngle() * 180.0f / _PI, 1);  // deg [0,360)
   Serial.print(" tube=");    Serial.print(index_tube);
@@ -553,6 +591,11 @@ static void printST() {
 
 static void linkSpin(float rpm) {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  // A motion verb supersedes any lingering calibration state (else the CAL service
+  // branch in loop() hijacks the armed motor -- same trap linkIndex hit on the bench).
+  if (calibrationRunning() || cal_state == CAL_DONE) {
+    abortCalibration("superseded", CAL_IDLE);
+  }
   if (rpm < 0) rpm = 0;
   if (rpm > MAX_SPIN_RPM) rpm = MAX_SPIN_RPM;   // dual-mode ceiling (supply-bounded in reality)
   // Ensure we are in current-bounded closed loop and aligned/armed. enterStage()
@@ -596,11 +639,17 @@ static void linkHome() {
   Serial.print("OK HOME "); Serial.println(home_ref_rad, 4);
 }
 
-// Closed-loop angle move to a tube position (0..TUBE_COUNT-1). The gantry MUST be
-// unlocked before this (the Due sequences that). Takes the shortest path; on arrival it
-// holds the angle until the Due locks the gantry and sends STOP to disarm.
+// Crawl move to a tube position (0..TUBE_COUNT-1). The gantry MUST be unlocked before
+// this (the Due sequences that). Bidirectional shortest path; on settled arrival it
+// holds (velocity 0) until the Due locks the gantry and sends STOP to disarm.
 static void linkIndex(int tube) {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  // A motion verb supersedes any lingering calibration state -- otherwise the CAL
+  // service branch in loop() hijacks the freshly-armed motor and instantly disarms
+  // it (found on the bench: INDEX right after CAL DONE moved zero degrees).
+  if (calibrationRunning() || cal_state == CAL_DONE) {
+    abortCalibration("superseded", CAL_IDLE);
+  }
   tube = ((tube % TUBE_COUNT) + TUBE_COUNT) % TUBE_COUNT;
   index_tube = tube;
   // Refuse to enter a position move while the rotor is actually turning -- an index
@@ -622,13 +671,16 @@ static void linkIndex(int tube) {
   index_target  = cur + delta;
   index_arrived = false;
   index_mode    = true;
+  idx_phase     = IDX_APPROACH;
+  idx_retries   = 0;
+  idx_stall_ms  = millis();
+  idx_kick_until = 0;
   stop_then_disarm = false;
   // The assembly needs ~4.5 A to break stiction; the soft spin velocity gains barely
-  // command current at index speeds. Run the move on the CRAWL profile (disarm()
-  // restores SPIN) so the position servo actually has low-speed torque.
+  // command current at crawl speeds. Run the move on the CRAWL profile (disarm()
+  // restores SPIN). Velocity mode: the crawl state machine in loop() does the rest.
   applyPidProfile(CRAWL_PROFILE);
-  motor.controller = MotionControlType::angle;      // position servo
-  motor.velocity_limit = INDEX_VEL_LIMIT;           // slow, controlled index
+  motor.controller = MotionControlType::velocity;
   Serial.print("OK INDEX "); Serial.println(tube);
 }
 
@@ -811,7 +863,11 @@ static void serviceCalibration() {
   (void)c;
   g_last_current_a = fabsf(currentSense.getDCCurrent());
   float rpm = (encoder.getVelocity() / REV) * 60.0f;
-  float abs_err = fabsf(rpm - cal_target_rpm);
+  // Tracking error is measured against the RAMPED setpoint, not the step target:
+  // cal_target jumps by up to 1000 RPM at each step entry, so measuring against it
+  // banks a guaranteed >CAL_RPM_ERROR_LIMIT transient into max_err and fails every
+  // healthy run. The velocity loop's job is to follow ramp_vel; judge it on that.
+  float abs_err = fabsf(rpm - (ramp_vel / REV) * 60.0f);
   if (g_last_current_a > cal_max_current) cal_max_current = g_last_current_a;
   if (abs_err > cal_max_abs_rpm_err) cal_max_abs_rpm_err = abs_err;
   cal_sum_abs_rpm_err += abs_err;
@@ -1022,6 +1078,18 @@ void setup() {
   delay(300);
   SimpleFOCDebug::enable(&Serial);        // print SimpleFOC's own align/init diagnostics
 
+  // --- bus voltage, measured ONCE at boot ---------------------------------
+  // A_VBUS (PA0) through the board's 169k/18k divider. MUST happen BEFORE
+  // driver/current-sense init: the Arduino analogRead() de-inits the ADC it
+  // uses, and SimpleFOC's low-side current sense owns ADC1+ADC2 with injected
+  // sequences -- an analogRead at runtime would destroy current sensing. So
+  // this is a BOOT-TIME reading (catches PSU off / wrong voltage / a tripped
+  // supply across a reset), not a live rail monitor.
+  analogReadResolution(12);
+  g_vbus_boot = (float)analogRead(A_VBUS) * (3.3f * (169.0f + 18.0f) / 18.0f / 4095.0f);
+  Serial.print("VBUS(boot)="); Serial.print(g_vbus_boot, 1);
+  Serial.print("V (configured SUPPLY_VOLTAGE="); Serial.print(SUPPLY_VOLTAGE, 1); Serial.println("V)");
+
   // --- encoder (ABI quadrature, hardware TIM4 programmed directly) ---
   encoder.init();                        // configures + starts TIM4 in encoder mode
   motor.linkSensor(&encoder);
@@ -1082,6 +1150,7 @@ void setup() {
   obsCfg.lockDwellMs = SENSORLESS_LOCK_DWELL_MS;
   obsCfg.maxRpm = MAX_SPIN_RPM * 1.15f;   // headroom so the PLL can MEASURE an overshoot
                                           // past the commandable max instead of saturating
+  obsCfg.latencySec = SENSORLESS_LATENCY_SEC;
   observer.begin(obsCfg);
 
   bool ok_motor = motor.init();
@@ -1110,12 +1179,61 @@ void loop() {
     // the setpoint and (in open loop) advances the commutation angle. Keep this path
     // TIGHT: at high speed commutation must refresh far faster than the electrical Hz.
     if (index_mode) {
-      // Closed-loop angle move/hold to the tube position (gantry unlocked by the Due).
+      // Velocity-crawl move/hold to the tube position (gantry unlocked by the Due).
+      // Approach -> stop early -> verify settled -> bounded correction passes -> hold.
       motor.loopFOC();
-      motor.move(index_target);
-      if (!index_arrived && fabsf(encoder.getAngle() - index_target) < INDEX_TOL_RAD) {
-        index_arrived = true;
-        Serial.print("OK INDEX DONE "); Serial.println(index_tube);
+      float ierr = index_target - encoder.getAngle();   // signed rad to go
+      float dist = fabsf(ierr);
+      switch (idx_phase) {
+        case IDX_APPROACH:
+          if (dist <= INDEX_STOP_LEAD_RAD) {
+            idx_phase = IDX_SETTLE;
+            idx_settle_ms = millis();
+            motor.move(0.0f);
+          } else {
+            float sp = (dist > INDEX_COARSE_RAD) ? INDEX_FAST_RADPS : INDEX_SLOW_RADPS;
+            // Stiction kick: at creep speed the (stable) crawl gains build current too
+            // slowly to RE-break stiction from rest. If the approach isn't moving, fire
+            // a BOUNDED pulse at FAST, then return to the creep; repeat per stall.
+            uint32_t nowms = millis();
+            if (fabsf(encoder.getVelocity()) > INDEX_SETTLE_VEL) {
+              idx_stall_ms = nowms;
+              if (idx_kick_until != 0 && nowms >= idx_kick_until) idx_kick_until = 0;
+            } else if (idx_kick_until == 0 &&
+                       (uint32_t)(nowms - idx_stall_ms) > INDEX_STALL_MS) {
+              idx_kick_until = nowms + INDEX_KICK_MS;
+            }
+            if (idx_kick_until != 0) {
+              if (nowms < idx_kick_until) {
+                sp = INDEX_FAST_RADPS;
+              } else {
+                idx_kick_until = 0;
+                idx_stall_ms = nowms;     // fresh stall window after each pulse
+              }
+            }
+            motor.move((ierr > 0.0f) ? sp : -sp);
+          }
+          break;
+        case IDX_SETTLE:
+          motor.move(0.0f);
+          if (fabsf(encoder.getVelocity()) > INDEX_SETTLE_VEL) {
+            idx_settle_ms = millis();               // still coasting -- restart the dwell
+          } else if ((uint32_t)(millis() - idx_settle_ms) >= INDEX_SETTLE_MS) {
+            if (dist <= INDEX_DONE_TOL_RAD || idx_retries >= INDEX_MAX_RETRIES) {
+              idx_phase = IDX_HOLD;
+              index_arrived = true;
+              Serial.print("OK INDEX DONE "); Serial.print(index_tube);
+              Serial.print(" err_deg="); Serial.println(ierr * 180.0f / _PI, 1);
+            } else {
+              idx_retries++;                        // off-target at rest: correction pass
+              idx_phase = IDX_APPROACH;             // (bidirectional -- can back up)
+            }
+          }
+          break;
+        case IDX_HOLD:
+        default:
+          motor.move(0.0f);   // at rest on the detent; stiction + the lock taper hold it
+          break;
       }
     } else if (stage == CLOSEDLOOP) {
       // High-speed builds keep encoder FOC below the crossover and run the

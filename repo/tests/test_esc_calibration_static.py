@@ -145,7 +145,7 @@ def test_esc_stop_and_estop_abort_active_calibration_state():
     src = read(ESC_MAIN)
     assert "abortCalibration" in src
 
-    link_stop = src[src.index("static void linkStop()"):src.index("// Closed-loop angle move")]
+    link_stop = src[src.index("static void linkStop()"):src.index("// Crawl move to a tube position")]
     link_estop = src[src.index("static void linkEstop()"):src.index("static void linkPing()")]
 
     assert "abortCalibration" in link_stop

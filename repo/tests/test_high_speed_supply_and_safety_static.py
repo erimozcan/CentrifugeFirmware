@@ -45,6 +45,14 @@ def test_esc_cal_align_waits_for_gantry_lock_release():
     assert "CAL_LOCK_RELEASE_MS" in align
 
 
+def test_esc_cal_tracking_error_measured_against_ramped_setpoint():
+    src = read(ESC_MAIN)
+    # Measuring against the step target banks the step transient (up to ~1000 RPM)
+    # into max_err and fails every healthy run at CAL_RPM_ERROR_LIMIT=800.
+    assert "fabsf(rpm - (ramp_vel / REV) * 60.0f)" in src
+    assert "fabsf(rpm - cal_target_rpm)" not in src
+
+
 def test_esc_cal_encoder_check_handles_counter_wrap():
     src = read(ESC_MAIN)
     check = src[src.index("cal_encoder_start;"):src.index('calFail("encoder-moving")')]

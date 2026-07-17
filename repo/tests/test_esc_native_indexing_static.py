@@ -42,6 +42,29 @@ def test_esc_index_refuses_while_rotor_moving():
     assert "ERR INDEX rotor moving" in index_body
 
 
+def test_esc_index_is_settled_velocity_crawl_not_position_servo():
+    src = read(ESC_MAIN)
+    # A position servo closed through this assembly's stiction limit-cycles (bench
+    # 2026-07-17): INDEX must crawl in velocity mode and only report DONE after a
+    # settled dwell, with bounded bidirectional correction passes.
+    index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
+    assert "MotionControlType::velocity" in index_body
+    assert "MotionControlType::angle" not in index_body
+    assert "INDEX_SETTLE_MS" in src and "INDEX_STOP_LEAD_RAD" in src
+    assert "idx_retries" in src and "INDEX_MAX_RETRIES" in src
+    assert "err_deg=" in src
+
+
+def test_esc_motion_verbs_supersede_lingering_cal_state():
+    src = read(ESC_MAIN)
+    # INDEX/SPIN right after CAL DONE must clear cal state, or the CAL service branch
+    # in loop() hijacks the armed motor and instantly disarms it (bench 2026-07-17).
+    spin_body = src[src.index("static void linkSpin"):src.index("static void linkStop")]
+    index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
+    for body in (spin_body, index_body):
+        assert 'abortCalibration("superseded", CAL_IDLE)' in body
+
+
 def test_master_syncs_esc_home_reference_and_reads_st_angle():
     src = read(MASTER_MOTOR)
     assert 'txLiteral("HOME")' in src

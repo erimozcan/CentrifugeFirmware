@@ -199,7 +199,10 @@
 
 // Gantry tube indexing (ROTATE). Reuses RUN_RELEASE_MS/RUN_ENGAGE_MS for the lock dwells.
 #define TUBE_COUNT              4U      // 4 tube positions, 90 deg apart (matches the ESC)
-#define ROTATE_MOVE_TIMEOUT_MS  8000U   // max time to reach the tube -> else fault
+#define ROTATE_MOVE_TIMEOUT_MS 20000U   // max time to reach the tube -> else fault. Covers the
+                                        // ESC crawl's settle dwells + stiction-kick retries AND
+                                        // the first-index-after-boot case (FOC align ~3-5 s
+                                        // precedes the move) -- bench-measured 2026-07-17
 
 // Rotate implementation. DEFAULT (flag ON, 2026-07-17) = the ESC's native closed-loop
 // INDEX verb: a SimpleFOC angle-mode servo move to the tube detent -- shortest path
