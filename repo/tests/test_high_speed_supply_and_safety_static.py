@@ -52,6 +52,17 @@ def test_esc_cal_encoder_check_handles_counter_wrap():
     assert "ENCODER_CPR - diff" in check
 
 
+def test_observer_lock_is_never_claimed_at_standstill():
+    src = read(ESC_MAIN)
+    # CAL start and disarm must clear observer state WITHOUT the handoff-seed lock
+    # (resetFromElectrical latches locked=true; obs_lock telemetry must stay honest).
+    cal_start = src[src.index("static void startCalibration"):src.index("static void stopCalibration")]
+    assert "observer.reset()" in cal_start
+    assert "resetFromElectrical" not in cal_start
+    disarm_body = src[src.index("static void disarm"):src.index("static void printStat")]
+    assert "observer.reset()" in disarm_body
+
+
 def test_master_cal_start_requires_door_closed():
     src = read(MASTER_COMMANDS)
     start_gate = src[src.index("bool isEscServiceStartState"):src.index("bool isEscServiceStopState")]

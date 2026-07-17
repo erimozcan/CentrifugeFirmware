@@ -20,6 +20,8 @@ struct SensorlessObserverConfig {
 class SensorlessObserver {
  public:
   void begin(const SensorlessObserverConfig &cfg);
+  void reset();   // zero all state WITHOUT claiming lock (resetFromElectrical latches
+                  // locked=true for the handoff seed -- wrong for a fresh shadow start)
   void resetFromEncoder(float mechanicalAngleRad, float mechanicalRpm);
   void resetFromElectrical(float electricalAngleRad, float mechanicalRpm);
   void update(float ia, float ib, float ic,

@@ -22,6 +22,18 @@ void SensorlessObserver::begin(const SensorlessObserverConfig &cfg) {
   bemfVolts_ = 0.0f;
 }
 
+void SensorlessObserver::reset() {
+  locked_ = false;
+  electricalAngle_ = 0.0f;
+  electricalOmega_ = 0.0f;
+  mechanicalRpm_ = 0.0f;
+  lastIalpha_ = 0.0f;
+  lastIbeta_ = 0.0f;
+  lockMs_ = 0.0f;
+  phaseErrorToEncoder_ = 0.0f;
+  bemfVolts_ = 0.0f;
+}
+
 void SensorlessObserver::resetFromEncoder(float mechanicalAngleRad, float mechanicalRpm) {
   resetFromElectrical(mechanicalAngleRad * cfg_.polePairs, mechanicalRpm);
 }

@@ -341,6 +341,7 @@ static void disarm(const char *why) {
   spin_mode = ENCODER_FOC;
   sensorless_loss_reported = false;
   index_mode = false;
+  observer.reset();                    // no stale "locked" may survive into the next arm
   applyPidProfile(SPIN_PROFILE);       // undo an index move's CRAWL gains
   motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::foc_current;
@@ -736,7 +737,7 @@ static void startCalibration() {
   cal_target_rpm = 0.0f;
   strncpy(cal_error, "none", sizeof(cal_error) - 1U);
   cal_error[sizeof(cal_error) - 1U] = '\0';
-  observer.resetFromElectrical(0.0f, 0.0f);
+  observer.reset();   // fresh shadow state; must NOT claim lock at standstill
   setCalState(CAL_ALIGN);
   Serial.println("OK CAL START");
 }
