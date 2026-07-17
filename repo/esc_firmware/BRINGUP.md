@@ -61,8 +61,11 @@ two-way controller, or type them yourself).
 - High-speed validation is staged: first prove encoder FOC to 4000 RPM, then
   inspect observer shadow telemetry (`obs_rpm`, `obs_lock`, `phase_err`) before
   commanding handoff above the crossover.
-- First sensorless trials should use the 5 A observer current trip and step
-  through 5000, 7000, 9000, then 10000 RPM unloaded before testing the full rotor.
+- First sensorless trials should use the 5 A observer current trip and step up
+  gradually, unloaded before the full rotor. The firmware clamps the accepted
+  target to what the SUPPLY can drive (BEMF + margin <= VBUS/2): on the 12 V
+  bench that is ~5720 RPM (step 4500 -> 5000 -> 5500); the 9000/10000 steps only
+  exist on the 24 V bus (`-D SUPPLY_VOLTAGE=24.0f`, matching the real supply).
 - **6 V (VBUS/2) cap** is required for clean low-side CS but limits top speed; a
   1100 KV motor's BEMF approaches the modulation limit well below 13k RPM.
   For higher RPM raise the **bus voltage**, do NOT relax the VBUS/2 cap.

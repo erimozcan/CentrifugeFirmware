@@ -116,7 +116,12 @@ void MotorInterface::commandIndex(uint8_t escTube) {
     return;
   }
   if ((uint32_t)(now - lastTxMs_) >= ESC_TX_HEARTBEAT_MS) {
-    txLiteral("PING");       // feed the ESC watchdog while it holds the angle
+    if (indexArrived_) {
+      txLiteral("PING");     // feed the ESC watchdog while it holds the angle
+    } else {
+      txIndex(escTube);      // re-send until arrival: INDEX is idempotent, and a single
+                             // dropped UART line must not strand the move into a timeout
+    }
     lastTxMs_ = now;
   }
 }
@@ -183,6 +188,9 @@ void MotorInterface::maintainHome() {
     detentRef_ = measuredFrac_;
     homeSet_ = true;
     homePending_ = false;
+#ifdef ROTATE_VIA_INDEX
+    txLiteral("HOME");            // sync the ESC's own detent reference to this position
+#endif
     return;
   }
   uint32_t now = millis();
@@ -427,6 +435,15 @@ void MotorInterface::parseEscLine(const char *line) {
   const char *hz = findValue(line, "hz=");
   if (hz != nullptr) {
     escLoopHz_ = static_cast<uint32_t>(atol(hz));
+  }
+
+  // The ST stream also carries the absolute shaft angle (pos=, degrees [0,360)). Feed it
+  // into the same slot the STAT poll fills, so home capture and arrivedTube() stay fresh
+  // at 10 Hz without extra "?" polling (the ESC-native INDEX path never polls STAT).
+  const char *pos = findValue(line, "pos=");
+  if (pos != nullptr) {
+    measuredFrac_ = static_cast<float>(atof(pos)) * (1.0f / 360.0f);
+    rotSeen_ = true;
   }
 
   // Index arrival: the ESC reports state=indexed once it has reached + is holding the tube.

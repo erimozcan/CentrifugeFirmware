@@ -18,10 +18,20 @@ priority):
 | Verb | Effect |
 |---|---|
 | `SPIN <rpm>` | arm/align if needed, ramp to target; acks `OK SPIN` once armed |
+| `INDEX <0-3>` | closed-loop angle-servo move to a tube detent; holds until `STOP` |
+| `HOME` | capture the CURRENT shaft angle as tube 0's detent reference |
 | `STOP` | ramp to 0, then disarm |
 | `ESTOP` | cut torque immediately |
 | `PING` -> `OK PONG` | heartbeat |
 | `STATUS?` | one `ST` line on demand |
+| `CAL START/STOP/STATUS/APPLY` | manual service calibration (see BRINGUP.md) |
+| `PROFILE SPIN/CRAWL` | select the ESC-owned PID profile |
+| `TUNE?` | print the active gains |
+
+`INDEX` runs on the CRAWL profile internally (the assembly needs ~4.5 A to break
+stiction; the soft spin gains stall a slow servo move) and restores SPIN on disarm.
+It refuses while the rotor is turning (>100 RPM) and moves shortest-path in either
+direction. Targets are `HOME` reference + n x 90 deg.
 
 First verb received engages "link mode": telemetry streams
 `ST rpm=.. tgt=.. state=.. cur=..` at ~10 Hz, and a **watchdog fires after
@@ -54,18 +64,22 @@ PID gains this way at every run start): `1/2/3/4` select stage
 Default builds clamp high-level `SPIN` commands to 4000 RPM and stay in
 magnetic-encoder FOC. `-D HIGH_SPEED_SENSORLESS=1` or the
 `b_g431_esc1_hs` PlatformIO environment enables observer shadow telemetry and
-the sensorless handoff path up to 10k RPM. Treat this as a bench-validation
-mode only until `state=spin-shadow|spin-sensorless`, `obs_rpm`, `obs_lock`,
-and `phase_err` have been reviewed at staged speeds.
+the sensorless handoff path. The accepted ceiling is **supply-aware**:
+`min(10000, KV * (VBUS/2 - margin))` = **~5720 RPM on the 12 V bench**, the full
+**10000 RPM only on the 24 V bus** (`-D SUPPLY_VOLTAGE=24.0f`, and the flag must
+match the physical supply). This is back-EMF physics, not tuning -- a 12 V bus
+cannot drive this 1100 KV motor meaningfully past ~6k. Treat high-speed mode as
+bench-validation only until `state=spin-shadow|spin-sensorless`, `obs_rpm`,
+`obs_lock`, and `phase_err` have been reviewed at staged speeds.
 
 ## Source vs. the flash on the shipped device
 
-The source here is a **superset** of what is flashed on the device: it adds an
-`INDEX <0-3>` closed-loop tube-positioning verb that was staged but never
-flashed (the master instead closes the tube-indexing loop itself from encoder
-telemetry; its default `ROTATE_VIA_INDEX`-off build matches the shipped ESC).
-Reflashing this source is safe and enables the more precise ESC-side indexing
-(flip `ROTATE_VIA_INDEX` on in `../firmware/src/config.h` afterwards).
+As of 2026-07-17 the master's default build has `ROTATE_VIA_INDEX` **on**: tube
+indexing is done by this ESC firmware's closed-loop `INDEX` verb (smooth,
+bidirectional, ~2 deg landing, active hold while the lock seats). This REQUIRES
+an ESC flashed from this source. An ESC still running the old flash (no
+`INDEX`/`HOME`) needs `ROTATE_VIA_INDEX` commented back out in
+`../firmware/src/config.h`, which restores the legacy Nano-side crawl.
 
 ## Reflashing
 

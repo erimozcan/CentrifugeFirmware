@@ -75,7 +75,11 @@ bool isMeasuredStoppedForService(const SystemContext &ctx) {
 }
 
 bool isEscServiceStartState(const SystemContext &ctx) {
+  // Calibration SPINS the rotor (up to 4000 RPM): require the door genuinely CLOSED,
+  // exactly like a run. (The door-open hard-stop only covers run states, so this gate
+  // is the ONLY thing standing between CAL_START and an open-door spin.)
   return (ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE) &&
+         ctx.doorState == DOOR_STATE_CLOSED &&
          isMeasuredStoppedForService(ctx) &&
          !isEscCalibrationActive(ctx);
 }

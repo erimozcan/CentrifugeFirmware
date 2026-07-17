@@ -201,11 +201,13 @@
 #define TUBE_COUNT              4U      // 4 tube positions, 90 deg apart (matches the ESC)
 #define ROTATE_MOVE_TIMEOUT_MS  8000U   // max time to reach the tube -> else fault
 
-// Rotate implementation. DEFAULT (flag OFF) = the NANO closes the position loop over the
-// ESC's EXISTING firmware: it commands SPIN (velocity) and counts the encoder revolutions
-// the ESC reports in its STAT line (polled with "?"). Define ROTATE_VIA_INDEX to instead
-// use the ESC's native closed-loop INDEX verb (needs the updated ESC firmware -- tighter).
-// #define ROTATE_VIA_INDEX
+// Rotate implementation. DEFAULT (flag ON, 2026-07-17) = the ESC's native closed-loop
+// INDEX verb: a SimpleFOC angle-mode servo move to the tube detent -- shortest path
+// (bidirectional), smooth decel, ~2 deg landing, active hold until the lock seats.
+// Requires the updated ESC firmware (INDEX + HOME verbs). Comment the flag OUT to fall
+// back to the legacy Nano-side crawl (SPIN + STAT-angle polling, forward-only) for an
+// ESC still running the old flash.
+#define ROTATE_VIA_INDEX
 
 // Nano-side velocity-feedback rotate tunables (direct 1:1 drive: 90 deg = 0.25 rev).
 // The Nano crawls the gantry forward to an ABSOLUTE detent, read from the encoder angle

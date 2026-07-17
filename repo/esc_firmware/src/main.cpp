@@ -38,7 +38,11 @@
 #endif
 
 #define POLE_PAIRS         7        // GT2215/10: 14 magnets / 2
-#define SUPPLY_VOLTAGE     12.0f    // bench PSU (3S equivalent)
+#ifndef SUPPLY_VOLTAGE
+#define SUPPLY_VOLTAGE     12.0f    // bench PSU (3S equivalent). For the 24 V bus build
+                                    // with `-D SUPPLY_VOLTAGE=24.0f` -- every voltage cap and
+                                    // the reachable-RPM clamp below scale from this.
+#endif
 
 // Low-side current sense ONLY reads cleanly below ~VBUS/2 duty, so every voltage
 // ceiling here is capped at VBUS/2. (Confirmed for MB1419C on the SimpleFOC forum.)
@@ -82,13 +86,19 @@
 #define MOTOR_KV           1100.0f  // GT2215/10: 1100 RPM per volt of back-EMF
 #define CROSSOVER_RPM      4000.0f  // closed-loop below, open-loop above
 #define CROSSOVER_HYST_RPM  300.0f  // hysteresis so it doesn't chatter at the boundary
+#define OL_BEMF_MARGIN      0.8f    // open-loop drives back-EMF + this margin (keeps current low)
+#define OL_VOLT_CAP        VBUS_HALF // open-loop voltage ceiling (== driver limit; raise supply for more)
 #if HIGH_SPEED_SENSORLESS
-#define MAX_SPIN_RPM      10000.0f  // top commandable target (supply-bounded in reality)
+// Commandable ceiling is SUPPLY-AWARE: the design target is 10k, but the drive can only
+// hold sync while BEMF + OL_BEMF_MARGIN fits under OL_VOLT_CAP. Clamping the accepted
+// target here (instead of letting it sail past and fault) makes the physics explicit:
+//   12 V -> KV*(6.0-0.8)  = 5720 RPM   |   24 V -> KV*(12.0-0.8) = 12320 -> clamped 10000.
+#define MAX_SPIN_RPM_DESIGN 10000.0f
+#define MAX_SPIN_RPM_SUPPLY (MOTOR_KV * (OL_VOLT_CAP - OL_BEMF_MARGIN))
+#define MAX_SPIN_RPM        (MAX_SPIN_RPM_SUPPLY < MAX_SPIN_RPM_DESIGN ? MAX_SPIN_RPM_SUPPLY : MAX_SPIN_RPM_DESIGN)
 #else
 #define MAX_SPIN_RPM      CROSSOVER_RPM
 #endif
-#define OL_BEMF_MARGIN      0.8f    // open-loop drives back-EMF + this margin (keeps current low)
-#define OL_VOLT_CAP        VBUS_HALF // open-loop voltage ceiling (== driver limit; raise supply for more)
 #define SENSORLESS_SHADOW_RPM       (CROSSOVER_RPM - 500.0f)
 #define SENSORLESS_LOCK_DWELL_MS    300.0f
 #define SENSORLESS_LOCK_ERR_RAD     (15.0f * _PI / 180.0f)
@@ -217,7 +227,8 @@ static char cal_error[24] = "none";
 
 static const float CAL_RPM_STEPS[] = {500.0f, 1000.0f, 2000.0f, 3000.0f, 4000.0f};
 static const uint8_t CAL_RPM_STEP_COUNT = sizeof(CAL_RPM_STEPS) / sizeof(CAL_RPM_STEPS[0]);
-#define CAL_ALIGN_TIMEOUT_MS       4000U
+#define CAL_LOCK_RELEASE_MS        1500U  // dwell before align: master retracts the gantry lock
+#define CAL_ALIGN_TIMEOUT_MS       6000U  // includes the lock-release dwell
 #define CAL_ENCODER_CHECK_MS        350U
 #define CAL_CURRENT_CHECK_MS        700U
 #define CAL_PID_STEP_MS            1200U
@@ -330,6 +341,7 @@ static void disarm(const char *why) {
   spin_mode = ENCODER_FOC;
   sensorless_loss_reported = false;
   index_mode = false;
+  applyPidProfile(SPIN_PROFILE);       // undo an index move's CRAWL gains
   motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.voltage_limit = MOTOR_VOLT_LIMIT;
@@ -570,6 +582,19 @@ static void linkStop() {
   Serial.println("OK STOP");
 }
 
+// Detent reference for tube indexing: the mechanical angle of tube 0's detent. Defaults
+// to the power-on shaft angle (the operator boots with the gantry homed at a detent);
+// re-captured any time the master sends HOME with the gantry parked at a detent.
+static float home_ref_rad = 0.0f;
+
+// HOME: capture the CURRENT shaft angle as tube 0's detent reference. Sent by the master
+// at boot and from the UI's "Set home" (gantry parked at a detent, rotor stopped).
+static void linkHome() {
+  link_mode = true; last_link_ms = millis(); wd_tripped = false;
+  home_ref_rad = _normalizeAngle(encoder.getAngle());
+  Serial.print("OK HOME "); Serial.println(home_ref_rad, 4);
+}
+
 // Closed-loop angle move to a tube position (0..TUBE_COUNT-1). The gantry MUST be
 // unlocked before this (the Due sequences that). Takes the shortest path; on arrival it
 // holds the angle until the Due locks the gantry and sends STOP to disarm.
@@ -577,12 +602,18 @@ static void linkIndex(int tube) {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
   tube = ((tube % TUBE_COUNT) + TUBE_COUNT) % TUBE_COUNT;
   index_tube = tube;
+  // Refuse to enter a position move while the rotor is actually turning -- an index
+  // is only ever valid from rest (the master sequences lock release around it).
+  if (fabsf((encoder.getVelocity() / REV) * 60.0f) > 100.0f) {
+    Serial.println("ERR INDEX rotor moving");
+    return;
+  }
   if (stage != CLOSEDLOOP) enterStage(CLOSEDLOOP);
-  if (!armed) arm();                   // aligns on the first arm (needs the 12 V bus)
+  if (!armed) arm();                   // aligns on the first arm (needs bus power)
   if (!armed) { Serial.println("ERR INDEX not armed (bus power? align failed)"); return; }
 
-  // Shortest move to the tube's ABSOLUTE mechanical angle (tube 0 = power-on position).
-  float target_mech = (float)tube * TUBE_STEP_RAD;
+  // Shortest move to the tube's ABSOLUTE detent angle (home_ref_rad = tube 0's detent).
+  float target_mech = _normalizeAngle(home_ref_rad + (float)tube * TUBE_STEP_RAD);
   float cur = encoder.getAngle();                  // cumulative rad
   float delta = target_mech - _normalizeAngle(cur);
   while (delta >  _PI) delta -= _2PI;              // shortest path, [-pi, pi]
@@ -591,6 +622,10 @@ static void linkIndex(int tube) {
   index_arrived = false;
   index_mode    = true;
   stop_then_disarm = false;
+  // The assembly needs ~4.5 A to break stiction; the soft spin velocity gains barely
+  // command current at index speeds. Run the move on the CRAWL profile (disarm()
+  // restores SPIN) so the position servo actually has low-speed torque.
+  applyPidProfile(CRAWL_PROFILE);
   motor.controller = MotionControlType::angle;      // position servo
   motor.velocity_limit = INDEX_VEL_LIMIT;           // slow, controlled index
   Serial.print("OK INDEX "); Serial.println(tube);
@@ -743,6 +778,12 @@ static void serviceCalibration() {
   }
 
   if (cal_state == CAL_ALIGN) {
+    // Give the master time to RETRACT the gantry lock before alignment torques the
+    // shaft (it releases the lock as soon as telemetry shows cal active). Aligning
+    // against the engaged taper pin grinds it and corrupts zero_electric_angle.
+    if ((uint32_t)(now - cal_state_ms) < CAL_LOCK_RELEASE_MS) {
+      return;
+    }
     if (!armed) {
       arm();
       if (!armed) {
@@ -782,6 +823,9 @@ static void serviceCalibration() {
       if (elapsed >= CAL_ENCODER_CHECK_MS) {
         int32_t diff = (int32_t)((uint16_t)TIM4->CNT) - (int32_t)cal_encoder_start;
         if (diff < 0) diff = -diff;
+        // TIM4 wraps at ENCODER_CPR (ARR = CPR-1): a rotor parked near the wrap point
+        // jitters between ~0 and ~CPR-1, so compare the CIRCULAR distance.
+        if (diff > (int32_t)(ENCODER_CPR / 2u)) diff = (int32_t)ENCODER_CPR - diff;
         if (diff > CAL_ENCODER_STILL_COUNTS) {
           calFail("encoder-moving");
         } else if ((int)motor.sensor_direction == 0) {
@@ -828,8 +872,9 @@ static void serviceCalibration() {
       uint32_t nowus = micros();
       float dt = (nowus - sensorless_last_us) * 1e-6f;
       sensorless_last_us = nowus;
-      float shadow_uq = olVoltage(fabsf(cal_target_rpm));
-      observer.update(c.a, c.b, c.c, shadow_uq, 0.0f, encoder_elec,
+      // Same rule as the run-time shadow: the observer gets the voltages FOC actually
+      // applied (motor.voltage), not the open-loop schedule.
+      observer.update(c.a, c.b, c.c, motor.voltage.q, motor.voltage.d, encoder_elec,
                       encoder_elec, rpm, dt);
       g_observer_rpm = observer.rpmMechanical();
       g_observer_phase_err = observer.phaseErrorToEncoder();
@@ -866,6 +911,7 @@ static bool handleHighLevel(const char *line) {
 
   if (strcmp(tok, "SPIN") == 0)    { linkSpin(atof(arg)); return true; }
   if (strcmp(tok, "INDEX") == 0)   { linkIndex(atoi(arg)); return true; }
+  if (strcmp(tok, "HOME") == 0)    { linkHome();          return true; }
   if (strcmp(tok, "STOP") == 0)    { linkStop();          return true; }
   if (strcmp(tok, "ESTOP") == 0)   { linkEstop();         return true; }
   if (strcmp(tok, "PING") == 0)    { linkPing();          return true; }
@@ -1033,7 +1079,8 @@ void setup() {
   obsCfg.lockPhaseErrorRad = SENSORLESS_LOCK_ERR_RAD;
   obsCfg.lockRpmError = SENSORLESS_LOCK_RPM_ERR;
   obsCfg.lockDwellMs = SENSORLESS_LOCK_DWELL_MS;
-  obsCfg.maxRpm = MAX_SPIN_RPM;
+  obsCfg.maxRpm = MAX_SPIN_RPM * 1.15f;   // headroom so the PLL can MEASURE an overshoot
+                                          // past the commandable max instead of saturating
   observer.begin(obsCfg);
 
   bool ok_motor = motor.init();
@@ -1089,8 +1136,10 @@ void loop() {
 
         if (ramp_rpm >= SENSORLESS_SHADOW_RPM) {
           spin_mode = OBSERVER_SHADOW;
-          float shadow_uq = olVoltage(fabsf(ramp_rpm));
-          observer.update(c.a, c.b, c.c, shadow_uq, 0.0f, encoder_elec,
+          // Feed the observer the voltages FOC actually applied this cycle (motor.voltage
+          // is set by loopFOC()), not a hypothetical schedule -- shadow lock must prove
+          // the observer tracks under the real drive, or the handoff gate means nothing.
+          observer.update(c.a, c.b, c.c, motor.voltage.q, motor.voltage.d, encoder_elec,
                           encoder_elec, encoder_rpm, dt);
         } else {
           spin_mode = ENCODER_FOC;
@@ -1124,6 +1173,13 @@ void loop() {
         g_observer_rpm = observer.rpmMechanical();
         g_observer_phase_err = observer.phaseErrorToEncoder();
         g_observer_bemf = observer.bemfVolts();
+
+        // NORMAL descent: once the commanded ramp is back below the crossover, hand
+        // cleanly back to encoder FOC (the encoder was kept fresh throughout) -- a
+        // routine STOP must not ride the observer to a stall and report as a fault.
+        if (spin_mode == SENSORLESS_PLL && ramp_rpm < (CROSSOVER_RPM - CROSSOVER_HYST_RPM)) {
+          enterClosedLoopMode();
+        }
 
         bool grace_done = (uint32_t)(millis() - sensorless_enter_ms) > 150U;
         if (spin_mode == SENSORLESS_PLL && grace_done && !observer.locked()) {

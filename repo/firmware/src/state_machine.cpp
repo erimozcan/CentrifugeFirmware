@@ -259,6 +259,12 @@ void StateMachine::tick(
   if (ctx.lockManualOverride && (ctx.state == STATE_SAFE_IDLE || ctx.state == STATE_BOOT)) {
     ctx.lockActuatorCommanded = ctx.lockManualEngaged;
   }
+  // ESC calibration spins the spindle while the master stays in SAFE_IDLE/BOOT: keep the
+  // gantry lock RELEASED for its whole duration (wins over the manual override). The ESC
+  // dwells CAL_LOCK_RELEASE_MS before its alignment so the pin has time to retract.
+  if (isEscCalibrationActive(ctx)) {
+    ctx.lockActuatorCommanded = false;
+  }
   // Safety net: never drive the lock into a still-turning rotor (e.g. coasting after an
   // E-STOP that jumped to a "locked" fault state) -- hold it released until near zero.
   if (ctx.rpm1 >= SAFE_UNLOCK_RPM) {
