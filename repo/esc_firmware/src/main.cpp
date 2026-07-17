@@ -159,7 +159,12 @@
 // (stop lead absorbs the stop coast), verify SETTLED, then correction passes (can back
 // up!) until within tolerance. The detent + lock taper do the final capture.
 #define INDEX_FAST_RADPS    (0.67f * REV)       // ~40 RPM approach outside the coarse zone
-#define INDEX_SLOW_RADPS    (0.25f * REV)       // ~15 RPM precision creep
+#define INDEX_SLOW_RADPS    (0.45f * REV)       // ~27 RPM precision creep. NOT lower under
+                                                // load: the creep's P-term must SUSTAIN
+                                                // breakaway (1.5 x 2.8 rad/s ~ 4.2 A vs the
+                                                // ~4.5 A stiction); at 15 RPM it re-stalled
+                                                // after every kick and retries ran out
+                                                // (bench, buckets on: landings -13/-36 deg)
 #define INDEX_COARSE_RAD    (0.11f * REV)       // creep inside this distance (~40 deg)
 #define INDEX_STOP_LEAD_RAD (0.008f * REV)      // cut drive ~3 deg early; coast covers it
 #define INDEX_DONE_TOL_RAD  (0.014f * REV)      // accept within ~5 deg (lock capture is 10-20)
@@ -168,9 +173,9 @@
                                                 // spikes ~3 RPM at rest, which kept
                                                 // restarting the settle dwell (bench)
 #define INDEX_SETTLE_MS     200U                // ... sustained this long
-#define INDEX_MAX_RETRIES   6                   // bounded correction passes
+#define INDEX_MAX_RETRIES   8                   // bounded correction passes
 #define INDEX_STALL_MS      200U                // approach not moving this long -> stiction kick
-#define INDEX_KICK_MS        40U                // kick is a bounded PULSE at FAST (P=1.5 x
+#define INDEX_KICK_MS        70U                // kick is a bounded PULSE at FAST (P=1.5 x
                                                 // 4.2 rad/s err ~ 6 A -> clamps at current
                                                 // limit -> breaks away), then back to the
                                                 // creep -- a continuous kick overshoots and
