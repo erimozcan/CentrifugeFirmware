@@ -61,11 +61,17 @@ two-way controller, or type them yourself).
 - High-speed validation is staged: first prove encoder FOC to 4000 RPM, then
   inspect observer shadow telemetry (`obs_rpm`, `obs_lock`, `phase_err`) before
   commanding handoff above the crossover.
-- First sensorless trials should use the 5 A observer current trip and step up
-  gradually, unloaded before the full rotor. The firmware clamps the accepted
-  target to what the SUPPLY can drive (BEMF + margin <= VBUS/2): on the 12 V
-  bench that is ~5720 RPM (step 4500 -> 5000 -> 5500); the 9000/10000 steps only
-  exist on the 24 V bus (`-D SUPPLY_VOLTAGE=24.0f`, matching the real supply).
+- High-speed = supervised ENCODER FOC (bench-validated 2026-07-17: 4500/5000/
+  5500 RPM held on 12 V, observer locked within ~4 deg throughout; the
+  sensorless handoff is experimental and compile-gated off). Step up gradually,
+  unloaded before the full rotor. The firmware clamps the accepted target to
+  what the SUPPLY can drive: ~5720 RPM on 12 V; 9000/10000 only exist on the
+  24 V bus (`-D SUPPLY_VOLTAGE=24.0f`, matching the real supply).
+- Alignment scales with the LOAD: 1.4 V suits the full assembly's stiction, but
+  on a stripped (bucketless) rotor it overshoots and corrupts zero_electric_angle
+  (bench: PP est 5.59, motor stalls at current limit). Use `k 0.6` before the
+  first arm when running light. NOTE initFOC only aligns ONCE per boot -- to
+  force a re-align you must RESET the board (reflash or power-cycle).
 - **6 V (VBUS/2) cap** is required for clean low-side CS but limits top speed; a
   1100 KV motor's BEMF approaches the modulation limit well below 13k RPM.
   For higher RPM raise the **bus voltage**, do NOT relax the VBUS/2 cap.

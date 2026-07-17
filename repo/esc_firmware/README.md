@@ -61,16 +61,23 @@ PID gains this way at every run start): `1/2/3/4` select stage
 
 ## High-speed sensorless validation
 
-Default builds clamp high-level `SPIN` commands to 4000 RPM and stay in
-magnetic-encoder FOC. `-D HIGH_SPEED_SENSORLESS=1` or the
-`b_g431_esc1_hs` PlatformIO environment enables observer shadow telemetry and
-the sensorless handoff path. The accepted ceiling is **supply-aware**:
-`min(10000, KV * (VBUS/2 - margin))` = **~5720 RPM on the 12 V bench**, the full
-**10000 RPM only on the 24 V bus** (`-D SUPPLY_VOLTAGE=24.0f`, and the flag must
-match the physical supply). This is back-EMF physics, not tuning -- a 12 V bus
-cannot drive this 1100 KV motor meaningfully past ~6k. Treat high-speed mode as
-bench-validation only until `state=spin-shadow|spin-sensorless`, `obs_rpm`,
-`obs_lock`, and `phase_err` have been reviewed at staged speeds.
+Default builds clamp high-level `SPIN` commands to 4000 RPM. The
+`b_g431_esc1_hs` environment (`-D HIGH_SPEED_SENSORLESS=1`) unlocks the
+high-speed regime, which is (bench-proven 2026-07-17) **supervised encoder
+FOC over the whole range**: the encoder path drives to the supply-aware
+ceiling `min(10000, KV * (VBUS/2 - margin))` -- **~5720 RPM on 12 V**
+(5500 held at 1.8 A on the bench), **10000 RPM on the 24 V bus**
+(`-D SUPPLY_VOLTAGE=24.0f`; the flag must match the physical supply --
+back-EMF physics, not tuning). Above 3500 RPM the back-EMF observer runs in
+shadow as SUPERVISION: `obs_rpm`, `obs_lock`, `phase_err` stream live (the
+frame-skew-compensated phase error held within ~4 deg to 5500 RPM).
+
+The observer-driven **sensorless handoff is EXPERIMENTAL and compile-gated
+off** (`SENSORLESS_HANDOFF_ENABLE=0`): its drive is a voltage schedule with
+no speed loop, which cannot hold a setpoint (bench: overran a light rotor
+until supervision faulted it out -- gracefully, every time). The handoff
+plumbing (seeded+slewed both-axis voltages, debounced current trip, clean
+descent re-lock) is validated and kept for a future closed-loop version.
 
 ## Source vs. the flash on the shipped device
 

@@ -75,12 +75,11 @@ void SensorlessObserver::update(float ia, float ib, float ic,
   bemfVolts_ = sqrtf(eAlpha * eAlpha + eBeta * eBeta);
 
   const float speedSign = (electricalOmega_ >= 0.0f) ? 1.0f : -1.0f;
-  // Advance the raw estimate by the fixed pipeline latency (see cfg.latencySec): the
-  // currents/voltages that produced this BEMF vector are ~latencySec old, so the rotor
-  // has already moved on by omega * latency. Without this the estimate lags the true
-  // angle proportionally to speed and the lock gate can never close at high RPM.
-  const float measuredElectricalAngle = normalizeAngle(
-      atan2f(eBeta, eAlpha) - speedSign * (kPi * 0.5f) + electricalOmega_ * cfg_.latencySec);
+  // The PLL's own angle stays RAW and self-consistent -- it is also the drive angle in
+  // sensorless mode, and biasing it there makes the drive chase a shifted copy of
+  // itself (bench: torque angle lagged ~45 deg at 4300 RPM, ~9 A, fault-rampdown).
+  const float measuredElectricalAngle =
+      normalizeAngle(atan2f(eBeta, eAlpha) - speedSign * (kPi * 0.5f));
   const float pllError = wrapPi(measuredElectricalAngle - electricalAngle_);
 
   electricalOmega_ += cfg_.pllKi * pllError * dt;
@@ -91,7 +90,12 @@ void SensorlessObserver::update(float ia, float ib, float ic,
   electricalAngle_ = normalizeAngle(electricalAngle_ + (electricalOmega_ + cfg_.pllKp * pllError) * dt);
   mechanicalRpm_ = electricalOmega_ * 60.0f / (cfg_.polePairs * kTwoPi);
 
-  phaseErrorToEncoder_ = wrapPi(electricalAngle_ - encoderElectricalAngle);
+  // Frame-skew compensation lives ONLY in the supervision comparison: the observer and
+  // the encoder reference are sampled through different pipelines, skewed by a fixed
+  // omega * |latencySec| (bench-fitted; see cfg). Compensating here calibrates the
+  // lock/unlock gate without touching the drive angle.
+  phaseErrorToEncoder_ =
+      wrapPi(electricalAngle_ + electricalOmega_ * cfg_.latencySec - encoderElectricalAngle);
   const float rpmError = fabsf(mechanicalRpm_ - encoderMechanicalRpm);
   const bool instantLock =
       bemfVolts_ >= cfg_.minBemfVolts &&

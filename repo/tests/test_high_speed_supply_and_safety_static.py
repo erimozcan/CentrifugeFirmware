@@ -22,6 +22,26 @@ def test_esc_spin_ceiling_is_supply_aware():
     assert "#ifndef SUPPLY_VOLTAGE" in src
 
 
+def test_esc_high_speed_is_supervised_encoder_foc_not_sensorless():
+    src = read(ESC_MAIN)
+    # Shipping architecture (bench 2026-07-17): encoder FOC over the full supply-aware
+    # range (5500 RPM proven on 12 V) with the observer as supervision; the sensorless
+    # HANDOFF is compile-gated OFF (voltage-scheduled drive has no speed loop).
+    assert "#define SENSORLESS_HANDOFF_ENABLE   0" in src
+    assert "SENSORLESS_HANDOFF_ENABLE && !calibrationRunning()" in src
+    # HS builds raise the encoder-FOC voltage ceiling toward (never past) VBUS/2.
+    assert "#define MOTOR_VOLT_LIMIT   (VBUS_HALF - 0.2f)" in src
+
+
+def test_esc_observer_frame_comp_is_supervision_only():
+    obs = read(REPO / "esc_firmware" / "src" / "sensorless_observer.cpp")
+    # The frame-skew compensation must live ONLY in the encoder comparison -- putting it
+    # in the PLL's own angle biases the drive frame (bench: ~45 deg lag, 9 A).
+    assert "electricalOmega_ * cfg_.latencySec - encoderElectricalAngle" in obs
+    measured = obs[obs.index("measuredElectricalAngle ="):obs.index("pllError")]
+    assert "latencySec" not in measured
+
+
 def test_esc_observer_shadow_uses_actual_foc_voltages():
     src = read(ESC_MAIN)
     # Shadow validation must feed the observer what FOC actually applied, or the lock

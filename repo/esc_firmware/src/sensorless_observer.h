@@ -15,10 +15,11 @@ struct SensorlessObserverConfig {
   float lockRpmError;
   float lockDwellMs;
   float maxRpm;
-  float latencySec;   // fixed measurement-pipeline delay compensated as angle advance
-                      // (= electricalOmega * latencySec). Bench-fitted 2026-07-17: the
-                      // raw estimate lagged the encoder by 39deg@3800 / 44.8@4500 /
-                      // 49.2@5000 RPM == a constant ~240 us -- PWM + sampling + loop lag.
+  float latencySec;   // fixed frame-skew compensation applied as angle offset
+                      // (= electricalOmega * latencySec; NEGATIVE retards). Bench-fitted
+                      // 2026-07-17: the raw estimate LEADS the encoder reference frame by
+                      // omega*240us (39deg@3800 / 44.8@4500 / 49.2@5000 RPM), so the
+                      // production value is -240e-6 -- verified to null the bias to ~1 deg.
 };
 
 class SensorlessObserver {

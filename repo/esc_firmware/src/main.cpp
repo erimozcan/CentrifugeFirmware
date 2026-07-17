@@ -64,9 +64,17 @@
 #define OPENLOOP_VOLTAGE   0.30f    // stage-2/3 open-loop voltage cap (voltage torque mode)
 #define BRINGUP_CURRENT    5.0f     // closed-loop CURRENT limit (foc_current) -- enough to
                                     // break the loaded shaft loose; the real safety cap. Live: `c`.
+#if HIGH_SPEED_SENSORLESS
+// High-speed builds give encoder FOC the full supply-aware ceiling: bench 2026-07-17
+// proved the ENCODER path holds 5500 RPM on 12 V -- the only ceiling is this voltage
+// limit (5.0 V was the 4000 RPM tuning), and the docs' rule was always "raise toward
+// VBUS/2 as you go faster; never past it".
+#define MOTOR_VOLT_LIMIT   (VBUS_HALF - 0.2f)  // 5.8 V @ 12 V, 11.8 V @ 24 V (< VBUS/2)
+#else
 #define MOTOR_VOLT_LIMIT   5.0f     // closed-loop voltage ceiling: high enough for 4000 RPM
                                     // back-EMF (~3.6 V). Safe because foc_current bounds the
                                     // current; voltage just follows what BEMF needs. (<= VBUS/2)
+#endif
 
 // ===== High-speed profile: encoder FOC <-> sensorless PLL ====================
 // Closed-loop FOC (AS5047P encoder + current sense) runs 0..CROSSOVER_RPM. With
@@ -105,9 +113,33 @@
 #define SENSORLESS_LOCK_RPM_ERR     300.0f
 #define SENSORLESS_MIN_BEMF_V       1.0f
 #define SENSORLESS_TRIAL_CURRENT_A  5.0f
-#define SENSORLESS_LATENCY_SEC      240e-6f  // measurement-pipeline delay, bench-fitted
-                                             // 2026-07-17 (39deg@3800/44.8@4500/49.2@5000
-                                             // == constant ~240 us); see observer cfg
+#ifndef SENSORLESS_HANDOFF_ENABLE
+#define SENSORLESS_HANDOFF_ENABLE   0        // EXPERIMENTAL. The sensorless DRIVE is a
+                                             // voltage schedule with NO speed feedback:
+                                             // bench 2026-07-17 it overran a light rotor
+                                             // (4688 on a 4500 command, current climbing)
+                                             // until supervision faulted it out -- by
+                                             // design it cannot hold a setpoint. Handoff
+                                             // stays off until it grows a speed loop off
+                                             // obs_rpm; encoder FOC covers the full
+                                             // supply-aware range (5500 RPM proven @12V)
+                                             // so nothing is lost. Shadow supervision
+                                             // telemetry stays fully active.
+#endif
+#define SENSORLESS_UQ_SLEW_VPS      5.0f     // sensorless drive voltage slew (V/s): the
+                                             // handoff seeds from the FOC-applied voltage
+                                             // and slews to the schedule -- a hard step
+                                             // put a ~2 A transient into 0.32 ohm and
+                                             // false-tripped the current check (bench)
+#define SENSORLESS_OC_TRIP_MS       50U      // trial-current trip must be SUSTAINED this
+                                             // long (single-sample trips on switchover
+                                             // transients / CS noise near VBUS/2 duty)
+#define SENSORLESS_LATENCY_SEC     -240e-6f  // frame-skew compensation, bench-fitted
+                                             // 2026-07-17. Raw observer LEADS the encoder
+                                             // reference by omega*240us (39deg@3800 /
+                                             // 44.8@4500 / 49.2@5000); a +240us advance
+                                             // DOUBLED the bias (76/88/99 measured), the
+                                             // -240us retard nulls it to ~+/-1 deg.
 #define MOTOR_PHASE_RESISTANCE_OHM  0.32f
 #define MOTOR_PHASE_INDUCTANCE_H    0.000010f
 
@@ -208,6 +240,11 @@ static SpinControlMode spin_mode = ENCODER_FOC;
 static uint32_t sensorless_last_us = 0;
 static uint32_t sensorless_enter_ms = 0;
 static bool sensorless_loss_reported = false;
+static float sensorless_uq = 0.0f;       // slewed drive voltage (seeded from FOC at handoff)
+static float sensorless_ud = 0.0f;       // d-axis seeded from FOC too, slewed to 0 -- dropping
+                                         // it in one cycle steps the applied VECTOR angle and
+                                         // the PLL faulted out re-converging (bench)
+static uint32_t sensorless_oc_ms = 0;    // when the trial current first exceeded the trip
 static float g_observer_phase_err = 0.0f;
 static float g_observer_rpm = 0.0f;
 static float g_observer_bemf = 0.0f;
@@ -454,6 +491,9 @@ static void enterSensorlessMode(float encoderElectricalAngle, float encoderRpm) 
   spin_mode = SENSORLESS_PLL;
   sensorless_loss_reported = false;
   observer.resetFromElectrical(encoderElectricalAngle, encoderRpm);
+  sensorless_uq = motor.voltage.q;   // seed BOTH axes from what FOC actually applied --
+  sensorless_ud = motor.voltage.d;   // no magnitude step AND no vector-angle step
+  sensorless_oc_ms = 0;
   sensorless_last_us = micros();
   sensorless_enter_ms = millis();
   Serial.println("MODE sensorless PLL (> crossover)");
@@ -1268,7 +1308,7 @@ void loop() {
         g_observer_phase_err = observer.phaseErrorToEncoder();
         g_observer_bemf = observer.bemfVolts();
 
-        if (!calibrationRunning() &&
+        if (SENSORLESS_HANDOFF_ENABLE && !calibrationRunning() &&
             ramp_rpm > CROSSOVER_RPM + CROSSOVER_HYST_RPM && observer.locked()) {
           enterSensorlessMode(encoder_elec, encoder_rpm);
         }
@@ -1282,11 +1322,30 @@ void loop() {
         float ramp_rpm = (ramp_vel / REV) * 60.0f;
         float encoder_rpm = (encoder.getVelocity() / REV) * 60.0f;
         float encoder_elec = motor.electricalAngle();
-        float uq = (spin_mode == FAULT_RAMPDOWN) ? 0.0f : olVoltage(fabsf(ramp_rpm));
+        float uq;
+        float ud;
+        if (spin_mode == FAULT_RAMPDOWN) {
+          uq = 0.0f;
+          ud = 0.0f;
+        } else {
+          // Slew toward the schedule instead of stepping (both axes seeded from the FOC
+          // voltages at handoff): a hard step drove a current transient into the 0.32 ohm
+          // motor, and a d-axis drop steps the vector angle out from under the PLL.
+          float uq_tgt = olVoltage(fabsf(ramp_rpm));
+          float slew = SENSORLESS_UQ_SLEW_VPS * dt;
+          if      (sensorless_uq + slew < uq_tgt) sensorless_uq += slew;
+          else if (sensorless_uq - slew > uq_tgt) sensorless_uq -= slew;
+          else                                    sensorless_uq = uq_tgt;
+          if      (sensorless_ud + slew < 0.0f)   sensorless_ud += slew;
+          else if (sensorless_ud - slew > 0.0f)   sensorless_ud -= slew;
+          else                                    sensorless_ud = 0.0f;
+          uq = sensorless_uq;
+          ud = sensorless_ud;
+        }
 
         PhaseCurrent_s c = currentSense.getPhaseCurrents();
         g_last_current_a = fabsf(currentSense.getDCCurrent());
-        observer.update(c.a, c.b, c.c, uq, 0.0f, observer.angleElectrical(),
+        observer.update(c.a, c.b, c.c, uq, ud, observer.angleElectrical(),
                         encoder_elec, encoder_rpm, dt);
 
         g_observer_rpm = observer.rpmMechanical();
@@ -1300,21 +1359,30 @@ void loop() {
           enterClosedLoopMode();
         }
 
-        bool grace_done = (uint32_t)(millis() - sensorless_enter_ms) > 150U;
+        // Grace covers the PLL re-converging on the post-handoff drive (bounded: the
+        // debounced current trip + watchdog stay active throughout).
+        bool grace_done = (uint32_t)(millis() - sensorless_enter_ms) > 300U;
         if (spin_mode == SENSORLESS_PLL && grace_done && !observer.locked()) {
           enterFaultRampdown("observer unlock");
           uq = 0.0f;
         }
+        // Current trip must be SUSTAINED: single samples spike on the handoff transient
+        // and on current-sense noise as duty approaches VBUS/2 (known-invalid regime).
         if (spin_mode == SENSORLESS_PLL && g_last_current_a > SENSORLESS_TRIAL_CURRENT_A) {
-          enterFaultRampdown("trial current limit");
-          uq = 0.0f;
+          if (sensorless_oc_ms == 0) sensorless_oc_ms = millis();
+          if ((uint32_t)(millis() - sensorless_oc_ms) > SENSORLESS_OC_TRIP_MS) {
+            enterFaultRampdown("trial current limit");
+            uq = 0.0f;
+          }
+        } else {
+          sensorless_oc_ms = 0;
         }
         if (spin_mode == FAULT_RAMPDOWN && fabsf(encoder_rpm) < (CROSSOVER_RPM - CROSSOVER_HYST_RPM)) {
           enterClosedLoopMode();
         }
 
         if (sensorlessModeActive()) {
-          motor.setPhaseVoltage(uq, 0.0f, observer.angleElectrical());
+          motor.setPhaseVoltage(uq, ud, observer.angleElectrical());
         }
       }
 #else
