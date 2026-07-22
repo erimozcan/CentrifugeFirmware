@@ -37,6 +37,19 @@ def test_esc_index_uses_crawl_torque_and_restores_spin_profile():
     assert "applyPidProfile(SPIN_PROFILE)" in disarm_body
 
 
+def test_esc_index_runs_under_reduced_torque_ceiling():
+    src = read(ESC_MAIN)
+    # Index moves are torque-capped (smoothness on the low-friction gantry) and the
+    # global limit must come back on disarm. PID_velocity.limit must be set explicitly
+    # (SimpleFOC copies current_limit into it only at init).
+    index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
+    assert "motor.current_limit = INDEX_CURRENT_A" in index_body
+    assert "motor.PID_velocity.limit = INDEX_CURRENT_A" in index_body
+    disarm_body = src[src.index("static void disarm"):src.index("static void printStat")]
+    assert "motor.current_limit = BRINGUP_CURRENT" in disarm_body
+    assert "motor.PID_velocity.limit = BRINGUP_CURRENT" in disarm_body
+
+
 def test_esc_index_resend_is_keepalive_not_restart():
     src = read(ESC_MAIN)
     # The master re-sends INDEX until arrival; a restart per re-send races the settle

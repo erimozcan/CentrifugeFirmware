@@ -162,7 +162,9 @@
 // and bidirectional: approach fast, creep near the target, cut drive a hair EARLY
 // (stop lead absorbs the stop coast), verify SETTLED, then correction passes (can back
 // up!) until within tolerance. The detent + lock taper do the final capture.
-#define INDEX_FAST_RADPS    (0.67f * REV)       // ~40 RPM approach outside the coarse zone
+#define INDEX_FAST_RADPS    (0.50f * REV)       // ~30 RPM approach outside the coarse zone
+                                                // (was 40; smaller FAST->SLOW step = less
+                                                // braking jerk at the coarse boundary)
 #define INDEX_SLOW_RADPS    (0.25f * REV)       // ~15 RPM precision creep. The rebuilt
                                                 // gantry (2026-07-22) has little stiction
                                                 // to sustain, so the creep is back to slow
@@ -179,8 +181,15 @@
                                                 // restarting the settle dwell (bench)
 #define INDEX_SETTLE_MS     200U                // ... sustained this long
 #define INDEX_MAX_RETRIES   8                   // bounded correction passes
-#define INDEX_STALL_MS      200U                // approach not moving this long -> stiction kick
-#define INDEX_KICK_MS        40U                // kick is a bounded PULSE at FAST (P x
+#define INDEX_CURRENT_A     2.0f                // torque ceiling DURING an index move (vs the
+                                                // global 5 A spin limit): hard cap on how hard
+                                                // any crawl correction can jerk the gantry.
+                                                // Plenty on the low-friction rebuild; restored
+                                                // to BRINGUP_CURRENT by disarm().
+#define INDEX_STALL_MS      400U                // approach not moving this long -> stiction kick
+                                                // (was 200; low-friction gantry rarely truly
+                                                // stalls -- fire less often, jiggle less)
+#define INDEX_KICK_MS        30U                // kick is a bounded PULSE at FAST (P x
                                                 // 4.2 rad/s err ~ 6 A -> clamps at current
                                                 // limit -> breaks away), then back to the
                                                 // creep -- a continuous kick overshoots and
@@ -278,7 +287,10 @@ static const PidProfile SPIN_PROFILE  = {"spin",  0.05f, 0.10f, 0.15f, 0.3f, 20.
 // moving guard rejections in one move). P=0.5 gives ~2 A authority -- plenty with the
 // friction gone. Do NOT raise I for authority (I=3.0 went unstable against the 0.15 s
 // velocity filter, bench 2026-07-17); the stall KICK covers residual sticky spots.
-static const PidProfile CRAWL_PROFILE = {"crawl", 0.50f, 0.10f, 0.15f, 0.3f, 20.0f};
+static const PidProfile CRAWL_PROFILE = {"crawl", 0.30f, 0.10f, 0.15f, 0.3f, 20.0f};
+                                        // ^ softened 0.5 -> 0.3 (2026-07-22b): P x velocity
+                                        // quantization noise at creep dithers the torque =
+                                        // visible jiggle on the low-friction gantry
 static const PidProfile *active_pid_profile = &SPIN_PROFILE;
 
 enum CalibrationState {
@@ -428,6 +440,8 @@ static void disarm(const char *why) {
   index_mode = false;
   observer.reset();                    // no stale "locked" may survive into the next arm
   applyPidProfile(SPIN_PROFILE);       // undo an index move's CRAWL gains
+  motor.current_limit = BRINGUP_CURRENT;        // undo the index torque ceiling
+  motor.PID_velocity.limit = BRINGUP_CURRENT;
   motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.voltage_limit = MOTOR_VOLT_LIMIT;
@@ -735,10 +749,12 @@ static void linkIndex(int tube) {
   idx_stall_ms  = millis();
   idx_kick_until = 0;
   stop_then_disarm = false;
-  // The assembly needs ~4.5 A to break stiction; the soft spin velocity gains barely
-  // command current at crawl speeds. Run the move on the CRAWL profile (disarm()
-  // restores SPIN). Velocity mode: the crawl state machine in loop() does the rest.
+  // Run the move on the CRAWL profile with the INDEX torque ceiling (disarm() restores
+  // SPIN + the global current limit). PID_velocity.limit must be set explicitly --
+  // SimpleFOC only copies current_limit into it at init().
   applyPidProfile(CRAWL_PROFILE);
+  motor.current_limit = INDEX_CURRENT_A;
+  motor.PID_velocity.limit = INDEX_CURRENT_A;
   motor.controller = MotionControlType::velocity;
   Serial.print("OK INDEX "); Serial.println(tube);
 }
