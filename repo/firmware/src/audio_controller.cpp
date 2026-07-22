@@ -17,7 +17,16 @@ bool AudioController::tryInit() {
   df.switchFunction(DFRobot_DF1201S::MUSIC);  // U-disk music mode
   df.setPrompt(false);                        // no power-on/insert prompt tones
   df.setLED(false);                           // quiet the module's indicator LED
-  df.setPlayMode(DFRobot_DF1201S::SINGLE);    // play one clip and stop (no looping)
+  // Single-shot play mode matters most: the module powers up in "repeat all" (play
+  // mode is NOT power-down-saved, unlike LED/prompt), where any clip cascades through
+  // every file on the flash and never stops. Retry once if the ACK was missed (e.g.
+  // it landed in the function-switch settle window) -- but do NOT gate ready_ on it:
+  // the ACK parse is not reliable on all module firmwares, and service()'s periodic
+  // re-assert (fire-and-forget, no ACK needed) enforces the mode within seconds anyway.
+  if (!df.setPlayMode(DFRobot_DF1201S::SINGLE)) {
+    delay(100);
+    df.setPlayMode(DFRobot_DF1201S::SINGLE);
+  }
   df.enableAMP();                             // built-in speaker amplifier on
   df.setVol(AUDIO_VOLUME);
   ready_ = true;
@@ -64,7 +73,11 @@ void AudioController::playFile(uint8_t fileNum) {
     return;
   }
   // Fire-and-forget AT+PLAYNUM=<n> (non-blocking). The module's "OK" reply is drained
-  // in service(); a new PLAYNUM simply interrupts any clip still playing.
+  // in service(); a new PLAYNUM simply interrupts any clip still playing. Sent ALONE,
+  // never piggybacked on another AT command -- the module can drop a command that
+  // arrives while it is still processing the previous line (this killed all playback
+  // when a PLAYMODE re-assert was prepended here with zero gap). Single-shot mode is
+  // enforced by service()'s spaced periodic re-assert instead.
   Serial2.print(F("AT+PLAYNUM="));
   Serial2.print(static_cast<int>(fileNum));
   Serial2.print(F("\r\n"));
@@ -103,6 +116,19 @@ void AudioController::service(SystemContext &ctx, uint32_t nowMs) {
   // Discard the module's ACK/echo bytes so the UART RX buffer never backs up.
   while (Serial2.available() > 0) {
     Serial2.read();
+  }
+
+  // Periodic play-mode re-assert (all states, incl. fault -- it's a raw non-blocking
+  // write). This is the storm-killer: whenever the module (re)boots it reverts to
+  // "repeat all" and can walk the whole flash off a single clip, so single-shot mode
+  // is re-imposed every few seconds for the machine's whole life. Only sent on a
+  // quiet bus -- never with a cue queued or one just played -- because the module can
+  // drop a command that arrives on the heels of another (see playFile()).
+  if (qCount_ == 0U &&
+      static_cast<uint32_t>(nowMs - lastModeAssertMs_) >= AUDIO_MODE_REASSERT_MS &&
+      static_cast<uint32_t>(nowMs - lastPlayMs_) >= AUDIO_CUE_GAP_MS) {
+    Serial2.print(F("AT+PLAYMODE=3\r\n"));   // 3 = SINGLE: play one clip, then stop
+    lastModeAssertMs_ = nowMs;
   }
 
   // First pass: capture the baseline so the initial boot state (e.g. lock engaged)
@@ -223,7 +249,8 @@ void AudioController::service(SystemContext &ctx, uint32_t nowMs) {
   // Release one queued clip at a time, spaced by AUDIO_CUE_GAP_MS, so a burst of
   // near-simultaneous cues plays back cleanly instead of cutting each other off.
   if (qCount_ > 0U &&
-      static_cast<uint32_t>(nowMs - lastPlayMs_) >= AUDIO_CUE_GAP_MS) {
+      static_cast<uint32_t>(nowMs - lastPlayMs_) >= AUDIO_CUE_GAP_MS &&
+      static_cast<uint32_t>(nowMs - lastModeAssertMs_) >= AUDIO_CMD_SPACING_MS) {
     playFile(queue_[qHead_]);
     qHead_ = (qHead_ + 1U) % kQueueLen;
     --qCount_;

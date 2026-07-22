@@ -60,7 +60,11 @@
 // friction (stiction) -- it needs ~4.5 A to break away from standstill, then only
 // ~2-3 A to keep spinning (measured on the bench, 5 A PSU). The bare-motor values
 // (0.6 V align / 1.5 A) could not seat or spin the loaded shaft. Live: `k` / `c`.
-#define ALIGN_VOLTAGE      1.40f    // FOC alignment push (~4.4 A; needs PSU Ilim ~5 A)
+#define ALIGN_VOLTAGE      0.90f    // FOC alignment push. Was 1.4 V for the ORIGINAL
+                                    // high-stiction assembly; the rebuilt low-friction
+                                    // gantry (2026-07-22) aligns clean at less and the
+                                    // gentler twitch coasts less afterward (1.4 V left
+                                    // the light gantry coasting ~300 RPM). Live: `k`.
 #define OPENLOOP_VOLTAGE   0.30f    // stage-2/3 open-loop voltage cap (voltage torque mode)
 #define BRINGUP_CURRENT    5.0f     // closed-loop CURRENT limit (foc_current) -- enough to
                                     // break the loaded shaft loose; the real safety cap. Live: `c`.
@@ -159,12 +163,13 @@
 // (stop lead absorbs the stop coast), verify SETTLED, then correction passes (can back
 // up!) until within tolerance. The detent + lock taper do the final capture.
 #define INDEX_FAST_RADPS    (0.67f * REV)       // ~40 RPM approach outside the coarse zone
-#define INDEX_SLOW_RADPS    (0.45f * REV)       // ~27 RPM precision creep. NOT lower under
-                                                // load: the creep's P-term must SUSTAIN
-                                                // breakaway (1.5 x 2.8 rad/s ~ 4.2 A vs the
-                                                // ~4.5 A stiction); at 15 RPM it re-stalled
-                                                // after every kick and retries ran out
-                                                // (bench, buckets on: landings -13/-36 deg)
+#define INDEX_SLOW_RADPS    (0.25f * REV)       // ~15 RPM precision creep. The rebuilt
+                                                // gantry (2026-07-22) has little stiction
+                                                // to sustain, so the creep is back to slow
+                                                // for fine landings. (On the OLD high-
+                                                // friction gantry this had to be ~27 RPM so
+                                                // the P-term could hold breakaway -- if
+                                                // friction ever returns, revisit.)
 #define INDEX_COARSE_RAD    (0.11f * REV)       // creep inside this distance (~40 deg)
 #define INDEX_STOP_LEAD_RAD (0.008f * REV)      // cut drive ~3 deg early; coast covers it
 #define INDEX_DONE_TOL_RAD  (0.014f * REV)      // accept within ~5 deg (lock capture is 10-20)
@@ -175,7 +180,7 @@
 #define INDEX_SETTLE_MS     200U                // ... sustained this long
 #define INDEX_MAX_RETRIES   8                   // bounded correction passes
 #define INDEX_STALL_MS      200U                // approach not moving this long -> stiction kick
-#define INDEX_KICK_MS        70U                // kick is a bounded PULSE at FAST (P=1.5 x
+#define INDEX_KICK_MS        40U                // kick is a bounded PULSE at FAST (P x
                                                 // 4.2 rad/s err ~ 6 A -> clamps at current
                                                 // limit -> breaks away), then back to the
                                                 // creep -- a continuous kick overshoots and
@@ -267,12 +272,13 @@ struct PidProfile {
 };
 
 static const PidProfile SPIN_PROFILE  = {"spin",  0.05f, 0.10f, 0.15f, 0.3f, 20.0f};
-// CRAWL gains are the Nano-crawl-proven stable set -- do NOT raise I for re-breakaway:
-// bench 2026-07-17 tried I=3.0 and the velocity loop went unstable against the 0.15 s
-// velocity filter (holds wandered, moves oscillated). Stiction re-breakaway is handled
-// DETERMINISTICALLY by the index state machine's stall kick instead (same recipe as the
-// door motor: brief FAST command until motion starts, then back to the creep).
-static const PidProfile CRAWL_PROFILE = {"crawl", 1.50f, 0.10f, 0.15f, 0.3f, 20.0f};
+// CRAWL retuned for the REBUILT low-friction gantry (2026-07-22): P=1.5 was sized to
+// shove ~4.5 A through stiction; on the light gantry it slams the current clamp and
+// hurls the rotor way past the crawl speeds (bench: >100 RPM overshoots, 22 rotor-
+// moving guard rejections in one move). P=0.5 gives ~2 A authority -- plenty with the
+// friction gone. Do NOT raise I for authority (I=3.0 went unstable against the 0.15 s
+// velocity filter, bench 2026-07-17); the stall KICK covers residual sticky spots.
+static const PidProfile CRAWL_PROFILE = {"crawl", 0.50f, 0.10f, 0.15f, 0.3f, 20.0f};
 static const PidProfile *active_pid_profile = &SPIN_PROFILE;
 
 enum CalibrationState {

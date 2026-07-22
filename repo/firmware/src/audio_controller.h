@@ -32,6 +32,7 @@ class AudioController {
   bool ready_ = false;   // module initialized OK -> playback enabled
   bool primed_ = false;  // captured the baseline ctx so boot state doesn't fire a cue
   uint32_t lastInitMs_ = 0;  // last idle re-probe timestamp (throttles retries)
+  uint32_t lastModeAssertMs_ = 0;  // last periodic AT+PLAYMODE=3 re-assert (see config.h)
 
   // Small FIFO so bursts of cues are spaced out instead of interrupting each other.
   static const uint8_t kQueueLen = 8;

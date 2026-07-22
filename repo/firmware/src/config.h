@@ -151,6 +151,19 @@
 #define AUDIO_INIT_RETRY_GAP_MS  300U   // gap between the boot-time attempts
 #define AUDIO_INIT_IDLE_RETRY_MS 3000U  // then re-probe this often while idle until ready
 
+// The DFPlayer PRO does NOT power-down-save its play mode: every module power-up
+// (including a brownout reboot if the shared 5 V rail droops under a lock-actuator
+// stall) silently reverts it to mode 2 = "repeat all". In that mode ANY clip rolls
+// straight on through every file on the flash, in copy order, forever -- the
+// "reads out all the voice lines nonstop" failure. So single-shot mode (3) is
+// re-asserted this often for the machine's whole life, not just once at init.
+#define AUDIO_MODE_REASSERT_MS 5000U
+// The module can drop an AT command that arrives while the previous one is still
+// being processed (a PLAYNUM sent back-to-back with a PLAYMODE was silently eaten ->
+// no sound at all). Every raw command is therefore given this much clear bus before
+// a queued clip is released.
+#define AUDIO_CMD_SPACING_MS 250U
+
 // Minimum spacing between consecutive clips. Cues are queued and released one every
 // this interval so a burst of events (e.g. end of run: locking -> door opening -> run
 // complete, all within ~1 s) doesn't cut each clip off. Set a bit above the longest
@@ -251,9 +264,9 @@
 // Door motor drive shaping (shared Due/Nano): a brief KICK to break the N20 worm-gear
 // static friction, then settle to a slow PWM run. All duties are 0-255.
 #define DOOR_KICK_MS      90U    // kick duration (shorter = less lunge at start)
-#define DOOR_KICK_DUTY    125    // kick strength (~49%); raised from 100 (2026-07-17,
-                                 // user wants a brisker door) -- lower = gentler kick
-#define DOOR_PWM_DUTY     160    // run duty (~63%) after the kick; raised from 130
+#define DOOR_KICK_DUTY    150    // kick strength (~59%); raised from 125 (2026-07-21,
+                                 // +20% door power request) -- lower = gentler kick
+#define DOOR_PWM_DUTY     192    // run duty (~75%) after the kick; raised from 160
                                  // (same request). DOOR_SPEED verb still overrides live.
 // Motor direction vs the door mechanism. Set to 1 if OPEN/CLOSE drive the wrong way
 // (swaps the DRV8871 outputs in firmware instead of rewiring OUT1/OUT2).

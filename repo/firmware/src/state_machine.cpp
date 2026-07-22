@@ -233,6 +233,10 @@ void StateMachine::tick(
     motor.commandIndex(escTube);
   } else {
     motor.finishIndexIfNeeded();               // disarm the ESC angle-hold if we were indexing
+    motor.maintainHome();                      // complete a pending detent-reference capture AND
+                                               // sync the ESC's HOME -- this call was missing on
+                                               // the INDEX path, so HOMED stayed 0 and every tube
+                                               // target was ESC-power-on-relative (2026-07-22)
     motor.sendVelocitySetpoint(ctx.rpmCmd);
   }
 #else
