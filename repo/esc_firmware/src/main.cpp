@@ -101,11 +101,15 @@
 #define OL_BEMF_MARGIN      0.8f    // open-loop drives back-EMF + this margin (keeps current low)
 #define OL_VOLT_CAP        VBUS_HALF // open-loop voltage ceiling (== driver limit; raise supply for more)
 #if HIGH_SPEED_SENSORLESS
-// Commandable ceiling is SUPPLY-AWARE: the design target is 10k, but the drive can only
-// hold sync while BEMF + OL_BEMF_MARGIN fits under OL_VOLT_CAP. Clamping the accepted
-// target here (instead of letting it sail past and fault) makes the physics explicit:
-//   12 V -> KV*(6.0-0.8)  = 5720 RPM   |   24 V -> KV*(12.0-0.8) = 12320 -> clamped 10000.
-#define MAX_SPIN_RPM_DESIGN 10000.0f
+// Commandable ceiling is SUPPLY-AWARE: the drive can only hold sync while BEMF +
+// OL_BEMF_MARGIN fits under OL_VOLT_CAP. Clamping the accepted target here (instead
+// of letting it sail past and fault) makes the physics explicit:
+//   12 V -> KV*(6.0-0.8)  = 5720 RPM   |   24 V -> KV*(12.0-0.8) = 12320 -> clamped 12000.
+// Design target raised 10000 -> 12000 (2026-07-28, after 10k was validated on the
+// 24 V device): 12k is the practical physical max of this bus -- IR drop + load eat
+// the last ~300 RPM of the 12320 ideal, so near the top the MEASURED speed falling
+// short of the command is the bus ceiling, not a fault. Validate 10k->12k in steps.
+#define MAX_SPIN_RPM_DESIGN 12000.0f
 #define MAX_SPIN_RPM_SUPPLY (MOTOR_KV * (OL_VOLT_CAP - OL_BEMF_MARGIN))
 #define MAX_SPIN_RPM        (MAX_SPIN_RPM_SUPPLY < MAX_SPIN_RPM_DESIGN ? MAX_SPIN_RPM_SUPPLY : MAX_SPIN_RPM_DESIGN)
 #else
@@ -195,7 +199,10 @@
                                                 // creep -- a continuous kick overshoots and
                                                 // ping-pongs the retry budget away (bench)
 #define INDEX_P_ANGLE     10.0f                 // position-loop P gain (angle mode unused by INDEX now)
-#define MOTOR_VEL_LIMIT   (200.0f * REV)        // spin velocity ceiling (restored after index)
+#define MOTOR_VEL_LIMIT   (210.0f * REV)        // spin velocity ceiling (restored after index).
+                                                // Was 200 rev/s == exactly 12000 RPM; must
+                                                // CLEAR MAX_SPIN_RPM or SimpleFOC clips the
+                                                // top-of-range velocity setpoint.
 
 // MB1419C current sense: 3 mOhm shunt, gain -64/7 (forum-confirmed for Rev C).
 #define SHUNT_OHMS         0.003f

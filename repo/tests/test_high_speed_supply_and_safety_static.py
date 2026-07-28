@@ -15,7 +15,7 @@ def test_esc_spin_ceiling_is_supply_aware():
     src = read(ESC_MAIN)
     # The HS ceiling must derive from the supply (BEMF + margin <= VBUS/2), clamped to
     # the 10k design target -- NOT a bare 10000 the 12 V supply can never reach.
-    assert "#define MAX_SPIN_RPM_DESIGN 10000.0f" in src
+    assert "#define MAX_SPIN_RPM_DESIGN 12000.0f" in src
     assert "#define MAX_SPIN_RPM_SUPPLY (MOTOR_KV * (OL_VOLT_CAP - OL_BEMF_MARGIN))" in src
     assert "MAX_SPIN_RPM_SUPPLY < MAX_SPIN_RPM_DESIGN" in src
     # Supply voltage is overridable per-build for the 24 V bus without editing source.

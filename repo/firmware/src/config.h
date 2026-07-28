@@ -26,7 +26,10 @@
 #define HIGH_SPEED_SENSORLESS 0
 #endif
 #if HIGH_SPEED_SENSORLESS
-#define MAX_RPM_BAREBONES 10000
+// 12000 = the 24 V bus's practical physical max (supply-bounded 12320 ideal minus
+// IR/load losses; see MAX_SPIN_RPM in the ESC). Raised from 10000 (2026-07-28)
+// after 10k was validated on the device; 10k-12k needs incremental validation.
+#define MAX_RPM_BAREBONES 12000
 #else
 #define MAX_RPM_BAREBONES 4000
 #endif

@@ -22,7 +22,7 @@ def test_ui_full_range_is_default_after_validation():
     # high-speed opt-in toggle is gone and the full range is simply the range.
     for ui_file in UI_FILES:
         html = ui_file.read_text(encoding="utf-8")
-        assert "const MAX_RUN_RPM = 10000" in html, f"{ui_file} missing 10k ceiling"
+        assert "const MAX_RUN_RPM = 12000" in html, f"{ui_file} missing 12k ceiling"
         assert 'id="hsMode"' not in html, f"{ui_file} still has the high-speed toggle"
         assert 'id="hsWarning"' not in html, f"{ui_file} still has the high-speed warning"
         assert "RUN_RPM_LIMITS" not in html, f"{ui_file} still has dual-mode RPM limits"
