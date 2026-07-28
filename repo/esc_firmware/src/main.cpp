@@ -66,8 +66,12 @@
                                     // gentler twitch coasts less afterward (1.4 V left
                                     // the light gantry coasting ~300 RPM). Live: `k`.
 #define OPENLOOP_VOLTAGE   0.30f    // stage-2/3 open-loop voltage cap (voltage torque mode)
-#define BRINGUP_CURRENT    5.0f     // closed-loop CURRENT limit (foc_current) -- enough to
-                                    // break the loaded shaft loose; the real safety cap. Live: `c`.
+#define BRINGUP_CURRENT    8.0f     // closed-loop CURRENT limit (foc_current) -- the torque
+                                    // ceiling; the real safety cap. Live: `c`. Raised 5 -> 8
+                                    // (2026-07-28): loaded tubes' aero drag current-limited the
+                                    // spin at ~9.7k RPM / 5.5k xg with 5 A. Margin: board is
+                                    // 40 A peak (UM2516), motor 18 A / 200 W for 30 s; expect
+                                    // ~6-7 A sustained at the loaded top -- watch motor temp.
 #if HIGH_SPEED_SENSORLESS
 // High-speed builds give encoder FOC the full supply-aware ceiling: bench 2026-07-17
 // proved the ENCODER path holds 5500 RPM on 12 V -- the only ceiling is this voltage
