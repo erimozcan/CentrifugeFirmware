@@ -29,6 +29,10 @@
 
 #include "config.h"
 
+#if DOOR_VM_VOLTAGE > DOOR_MOTOR_RATED_V
+#error "door_move_test kicks the door N20 at FULL VM (digitalWrite): forbidden while the DRV8871 VM rides the 24 V rail (DOOR_VM_VOLTAGE). Rewire VM to 12 V and set DOOR_VM_VOLTAGE=12 to bench-test."
+#endif
+
 enum MoveState : int8_t { IDLE = 0, MOVING_OPEN = -1, MOVING_CLOSE = 1 };
 
 static int runDuty = 64;            // ~25% slow-run duty (tune with +/-); shared style w/ door_motor_test

@@ -89,6 +89,16 @@ void HardwareGuard::updateFan(bool enabled) {
 //   OPEN  = forward: hold IN1 HIGH, PWM IN2.   CLOSE = reverse: hold IN2 HIGH, PWM IN1.
 //   drive duty D (0-255) -> PWM pin gets analogWrite(255 - D): D=255 is full drive (kick),
 //   small D is mostly braking = slow. runDuty is adjustable live from the UI.
+//
+// VM SCALING: every commanded duty (kick, run, UI DOOR_SPEED) is calibrated against the
+// N20's 12 V rating; doorDutyOnVm() rescales it onto the actual VM rail at the write, so
+// on the 24 V bus the motor's average voltage is unchanged (255 -> 127 applied) and full
+// VM can never reach the 12 V motor through this path.
+static uint8_t doorDutyOnVm(uint8_t duty) {
+  return static_cast<uint8_t>(
+      (static_cast<uint16_t>(duty) * DOOR_MOTOR_RATED_V) / DOOR_VM_VOLTAGE);
+}
+
 void HardwareGuard::updateDoorMotor(DoorMotorCommand command, uint8_t runDuty) {
   bool edge = (command != doorMotorCommand_);
   doorMotorCommand_ = command;
@@ -116,7 +126,7 @@ void HardwareGuard::updateDoorMotor(DoorMotorCommand command, uint8_t runDuty) {
     doorKicking_ = true;
     doorKickUntilMs_ = millis() + DOOR_KICK_MS;
     digitalWrite(holdPin, HIGH);
-    analogWrite(pwmPin, 255 - DOOR_KICK_DUTY);
+    analogWrite(pwmPin, 255 - doorDutyOnVm(DOOR_KICK_DUTY));
     doorAppliedDuty_ = DOOR_KICK_DUTY;
     return;
   }
@@ -128,7 +138,7 @@ void HardwareGuard::updateDoorMotor(DoorMotorCommand command, uint8_t runDuty) {
   uint8_t effectiveDuty = doorKicking_ ? DOOR_KICK_DUTY : runDuty;
   if (effectiveDuty != doorAppliedDuty_) {
     // Slow-decay: invert the duty onto the PWM (non-drive) pin. Honors live UI changes.
-    analogWrite(pwmPin, 255 - effectiveDuty);
+    analogWrite(pwmPin, 255 - doorDutyOnVm(effectiveDuty));
     doorAppliedDuty_ = effectiveDuty;
   }
 }

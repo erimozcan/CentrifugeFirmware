@@ -272,6 +272,17 @@
 // (swaps the DRV8871 outputs in firmware instead of rewiring OUT1/OUT2).
 #define DOOR_DIR_INVERT   1
 
+// Door-motor supply scaling. The N20 door motor (BOM M2) is a 12 V-max part; on the
+// 24 V single-bus rework its DRV8871 VM rides the 24 V rail directly (no room for the
+// BOM's P2 12 V buck). The 20 kHz slow-decay H-bridge PWM into the winding inductance
+// is electrically a buck stage, so updateDoorMotor() rescales every duty above (all
+// calibrated on the original 12 V rail) to keep the motor's AVERAGE voltage at its
+// 12 V rating -- commanded duty 255 means "12 V", never full VM. The full-VM bench
+// tests (door_digi_test / door_test / door_move_test) refuse to build while this is
+// above the motor rating. Set back to 12 if VM is ever rewired to a 12 V rail.
+#define DOOR_VM_VOLTAGE     24
+#define DOOR_MOTOR_RATED_V  12
+
 // Fan control: normal firmware drives the fan full-speed only while there is
 // motor activity, then holds it on for a cooldown. POWER_OFF still forces it off.
 #define FAN_COOLDOWN_MS           60000U

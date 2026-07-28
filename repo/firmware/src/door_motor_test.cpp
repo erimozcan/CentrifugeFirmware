@@ -16,6 +16,10 @@
 
 #include "config.h"
 
+#if DOOR_VM_VOLTAGE > DOOR_MOTOR_RATED_V
+#error "door_test kicks the door N20 at FULL VM (digitalWrite): forbidden while the DRV8871 VM rides the 24 V rail (DOOR_VM_VOLTAGE). Rewire VM to 12 V and set DOOR_VM_VOLTAGE=12 to bench-test."
+#endif
+
 static int runDuty = 64;         // ~25% run speed (target); tune with +/-
 static int dir = 0;              // 1 fwd, -1 rev, 0 stop
 static const int KICK_MS = 200;  // full-voltage kick to break worm-gear static friction

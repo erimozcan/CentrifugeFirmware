@@ -14,6 +14,10 @@
 
 #include "config.h"
 
+#if DOOR_VM_VOLTAGE > DOOR_MOTOR_RATED_V
+#error "door_digi_test drives the door N20 at FULL VM: forbidden while the DRV8871 VM rides the 24 V rail (DOOR_VM_VOLTAGE). Rewire VM to 12 V and set DOOR_VM_VOLTAGE=12 to bench-test."
+#endif
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(400);
