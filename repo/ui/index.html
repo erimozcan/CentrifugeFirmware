@@ -259,9 +259,9 @@
       </div>
       <div class="bottom">
         <div class="readout">
-          <div class="lbl">Rotor speed</div>
-          <div class="rpm mono"><span id="rpmActual">—</span><small>RPM</small></div>
-          <div class="tgt">target <b id="rpmTarget">—</b> · <span id="stateName" class="mono">—</span></div>
+          <div class="lbl">Centrifugal force</div>
+          <div class="rpm mono"><span id="rcfActual">—</span><small>× g</small></div>
+          <div class="tgt">target <b id="rcfTarget">—</b> × g · <span id="rpmSub" class="mono">—</span> · <span id="stateName" class="mono">—</span></div>
         </div>
         <div class="metaCol">
           <div class="big" id="metaTube">Tube —</div>
@@ -323,17 +323,9 @@
       <h2>Centrifuge <span class="statechip" id="runChip">—</span></h2>
       <div class="sub">Set the speed and time, then run. Arming is automatic.</div>
       <div class="fields">
-        <label class="field">Speed<input type="number" id="inRpm" value="4000" min="0" max="4000" step="100"><span id="rpmMaxLabel" style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">RPM · max 4000</span></label>
+        <label class="field">Force<input type="number" id="inRcf" value="1000" min="0" max="5869" step="50"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">× g · max 5869 (10k RPM @ r 52.5 mm)</span></label>
         <label class="field">Time<input type="number" id="inTime" value="10" min="0" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds hold</span></label>
         <label class="field">Ramp<input type="number" id="inRamp" value="10" min="1" max="120"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds</span></label>
-      </div>
-      <label class="hint" style="display:flex;align-items:center;gap:10px;margin-top:10px">
-        <input type="checkbox" id="hsMode" style="width:16px;height:16px">
-        <span>High-speed validation mode: allow UI commands up to 10000 RPM.</span>
-      </label>
-      <div class="hint" id="hsWarning" style="display:none;margin-top:6px;color:#ffd36b">
-        Bench-only. Flash matching <code>nano_esp32_hs</code> and <code>b_g431_esc1_hs</code> firmware first;
-        normal firmware still clamps commands to 4000 RPM.
       </div>
       <div class="spacer"></div>
       <div class="btnrow">
@@ -447,13 +439,17 @@ if (transport === 'serial' && !('serial' in navigator)) {
 
 // ================= protocol / connection =================
 const BAUD = 115200;
-const RUN_RPM_LIMITS = { normal: 4000, highSpeed: 10000 };
-function loadHighSpeedPreference() {
-  try { return typeof localStorage !== 'undefined' && localStorage.getItem('centrifugeHighSpeed') === '1'; }
-  catch { return false; }
-}
-let highSpeedMode = _params.get('hs') === '1' || loadHighSpeedPreference();
-let MAX_RUN_RPM = RUN_RPM_LIMITS.normal;
+// Speed is expressed to the operator as RELATIVE CENTRIFUGAL FORCE (× g) at the
+// tube radius; the machine protocol stays in RPM underneath. RCF = 1.118e-5 ×
+// r[cm] × rpm². 10,000 RPM @ r 52.5 mm ≈ 5869 × g — the full range was validated
+// on the 24 V bus (2026-07-28), so the old high-speed toggle is gone; both
+// firmwares clamp commands at 10,000 RPM regardless.
+const ROTOR_RADIUS_MM = 52.5;
+const RCF_PER_RPM2 = 1.118e-5 * (ROTOR_RADIUS_MM / 10);          // r in cm
+const rpmToRcf = rpm => RCF_PER_RPM2 * rpm * rpm;
+const rcfToRpm = rcf => Math.sqrt(Math.max(0, rcf) / RCF_PER_RPM2);
+const MAX_RUN_RPM = 10000;
+const MAX_RCF = Math.floor(rpmToRcf(MAX_RUN_RPM));               // 5869
 let port=null, reader=null, writer=null, keepReading=false, seq=0, rxBuf='';
 const pending = new Map();
 let lastStatus = null;
@@ -473,26 +469,6 @@ const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const log = (msg, cls='') => { const el=$('log'); if(!el) return;
   const at = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
   el.innerHTML += `<span class="${cls}">${msg}</span>\n`; if (at) el.scrollTop = el.scrollHeight; };
-
-function setHighSpeedMode(on, { persist=false } = {}) {
-  highSpeedMode = !!on;
-  MAX_RUN_RPM = highSpeedMode ? RUN_RPM_LIMITS.highSpeed : RUN_RPM_LIMITS.normal;
-  const rpmInput = $('inRpm');
-  if (rpmInput) {
-    rpmInput.max = String(MAX_RUN_RPM);
-    if ((+rpmInput.value || 0) > MAX_RUN_RPM) rpmInput.value = String(MAX_RUN_RPM);
-  }
-  const rpmLabel = $('rpmMaxLabel');
-  if (rpmLabel) rpmLabel.textContent = `RPM · max ${MAX_RUN_RPM}`;
-  const warning = $('hsWarning');
-  if (warning) warning.style.display = highSpeedMode ? '' : 'none';
-  const toggle = $('hsMode');
-  if (toggle) toggle.checked = highSpeedMode;
-  if (persist) {
-    try { localStorage.setItem('centrifugeHighSpeed', highSpeedMode ? '1' : '0'); } catch {}
-  }
-  if (lastStatus) render(lastStatus);
-}
 
 async function connect() {
   try {
@@ -665,7 +641,8 @@ function render(f) {
   setScene(sceneFor(f));
 
   if (!f) {
-    $('rpmActual').textContent='—'; $('rpmTarget').textContent='—'; $('stateName').textContent='—';
+    $('rcfActual').textContent='—'; $('rcfTarget').textContent='—'; $('rpmSub').textContent='—';
+    $('stateName').textContent='—';
     $('rpmBar').style.width='0'; $('sceneText').textContent='Offline';
     $('scenePill').className='scenePill'; $('btnClear').style.display='none';
     $('metaTube').textContent='Tube —'; $('metaDoor').textContent='Door —'; $('metaLock').textContent='Lock —';
@@ -678,9 +655,11 @@ function render(f) {
   }
   const st = f.STATE ?? 0;
 
-  // ---- hero HUD ----
-  $('rpmActual').textContent = (f.RPM1 ?? 0);
-  $('rpmTarget').textContent = (f.RPM_CMD ?? 0);
+  // ---- hero HUD (RCF primary, raw RPM as the small secondary readout) ----
+  const rpmMeas = Math.abs(f.RPM1 ?? 0);
+  $('rcfActual').textContent = Math.round(rpmToRcf(rpmMeas));
+  $('rcfTarget').textContent = Math.round(rpmToRcf(f.RPM_CMD ?? 0));
+  $('rpmSub').textContent = rpmMeas + ' RPM';
   $('stateName').textContent = STATE_NAMES[st] || ('state '+st);
   $('rpmBar').style.width = clamp((Math.abs(f.RPM1||0)/MAX_RUN_RPM)*100,0,100) + '%';
   $('btnClear').style.display = (f.FAULT ? '' : 'none');
@@ -798,7 +777,8 @@ function updatePower(f){ const on=!!(f&&f.POWER);
 
 async function doRun(){
   const f = lastStatus || {}; const st = f.STATE ?? 0;
-  const target = clamp(+$('inRpm').value||0, 0, MAX_RUN_RPM);
+  const rcf = clamp(+$('inRcf').value||0, 0, MAX_RCF);
+  const target = clamp(Math.round(rcfToRpm(rcf)), 0, MAX_RUN_RPM);
   const hold = Math.max(0, +$('inTime').value||0) * 1000;
   const ramp = Math.max(1, +$('inRamp').value||1) * 1000;
   try {
@@ -822,8 +802,6 @@ $('volSlider').onchange = e => cmd('AUDIO_VOL '+e.target.value,'volume');
 
 // ================= wire up =================
 $('btnConnect').onclick = () => (port ? disconnect() : connect());
-setHighSpeedMode(highSpeedMode);
-$('hsMode').onchange = e => setHighSpeedMode(e.target.checked, { persist:true });
 $('btnPower').onclick = doPower;
 $('btnGatePower').onclick = doPower;
 $('btnGateConnect').onclick = () => (port ? disconnect() : connect());
