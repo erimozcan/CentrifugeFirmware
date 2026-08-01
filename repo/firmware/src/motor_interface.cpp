@@ -235,6 +235,16 @@ void MotorInterface::startRotateToNearestDetent() {
   applyRotateTuning();
 }
 
+void MotorInterface::startRotateToHalfDetent(uint8_t k) {
+  rotNearest_ = false;
+  rotTargetFrac_ = mod1(detentRef_ +
+                        (static_cast<float>(k) + 0.5f) / static_cast<float>(TUBE_COUNT));
+  rotPhase_ = ROT_ACQUIRE;
+  rotSeen_ = false;
+  rotPollMs_ = 0U;
+  applyRotateTuning();
+}
+
 void MotorInterface::updateVelocityRotate() {
   uint32_t now = millis();
   if ((uint32_t)(now - rotPollMs_) >= ROTATE_POLL_MS) {

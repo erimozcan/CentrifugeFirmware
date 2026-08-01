@@ -74,10 +74,14 @@
 #define LOCK_IS_SERVO        1
 #define LOCK_PULSE_MIN_US      1000
 #define LOCK_PULSE_MAX_US      2000
-// Per Actuonix PQ12-R datasheet (Rev D): 1.0 ms = fully EXTEND, 2.0 ms = fully RETRACT.
-// On this build the mechanics are: EXTENDED = locked, RETRACTED = unlocked.
-#define LOCK_PULSE_LOCKED_US   1000  // 1.0 ms = extend = LOCKED
+// Per Actuonix PQ12-R datasheet (Rev D): 1.0 ms = fully EXTEND, 2.0 ms = fully RETRACT,
+// position linear in pulse width between them. On this build the mechanics are:
+// EXTENDED = locked, RETRACTED = unlocked. LOCKED stops at 95% of the stroke -- the
+// full 100% throw over-drives the pin into the gantry. TAMP is the partial 75% press
+// used by the post-run bucket-tamp pass (see STATE_RUN_TAMP_*).
+#define LOCK_PULSE_LOCKED_US   1050  // 95% extend = LOCKED
 #define LOCK_PULSE_UNLOCKED_US 2000  // 2.0 ms = retract = UNLOCKED
+#define LOCK_PULSE_TAMP_US     1250  // 75% extend = bucket-tamp press
 
 // WS2812 addressable LED strip on D11 (GPIO38, via RMT). Adafruit_NeoPixel.
 #define PIN_LED_STRIP        D11   // GPIO38 (data, via RMT)
@@ -212,6 +216,14 @@
 #define RUN_RELEASE_MS   800U   // let the lock RETRACT (release the gantry) before spinning
 #define RUN_SETTLE_MS   1500U   // dwell at 0 rpm so the rotor fully coasts to rest
 #define RUN_ENGAGE_MS    800U   // let the lock EXTEND (re-engage) before opening the door
+
+// Post-run bucket-tamp pass: the buckets are too light to fold back down after a spin,
+// so before the final lock (door still closed) the gantry visits the midpoint between
+// each pair of detents -- where the bucket, not the detent, sits under the lock pin --
+// and the lock does a partial 75% press (LOCK_PULSE_TAMP_US) to fold the bucket flat,
+// then retracts before moving on. Dwells mirror the other open-loop lock timings.
+#define TAMP_PRESS_MS    800U   // hold the 75% press on each bucket
+#define TAMP_RETRACT_MS  800U   // let the pin retract clear before the next move
 
 // Gantry tube indexing (ROTATE). Reuses RUN_RELEASE_MS/RUN_ENGAGE_MS for the lock dwells.
 #define TUBE_COUNT              4U      // 4 tube positions, 90 deg apart (matches the ESC)

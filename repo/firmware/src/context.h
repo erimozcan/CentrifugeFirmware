@@ -33,7 +33,13 @@ enum SystemState : uint8_t {
   STATE_ROTATE_ENGAGE = 17,
   // Post-spin (in the run cycle): index the gantry to the nearest detent so the lock can
   // actually mesh -- a spin stops the rotor at a random angle, not a lockable position.
-  STATE_RUN_INDEX = 18
+  STATE_RUN_INDEX = 18,
+  // Post-spin bucket-tamp pass (door still closed): after RUN_INDEX first parks at a
+  // detent, visit the midpoint between each detent pair (bucket under the lock pin) and
+  // press the lock to 75% to fold the bucket flat, retract, and move on. After all
+  // TUBE_COUNT buckets, RUN_INDEX runs again and the normal lock + door-open follow.
+  STATE_RUN_TAMP_MOVE = 19,    // gantry moving to the next half-detent (bucket position)
+  STATE_RUN_TAMP_PRESS = 20    // parked at the half-detent: 75% press, then retract
 };
 
 enum FaultCode : uint8_t {
@@ -174,6 +180,9 @@ struct SystemContext {
   uint8_t rotateTube;      // tube the in-progress rotate is heading to (1..TUBE_COUNT)
   uint8_t currentTube;     // 0 = unknown (e.g. after a spin), else the last indexed tube
   uint32_t rotateDeadlineMs;
+  uint8_t tampIndex;       // bucket-tamp pass: half-detent being visited (0..TUBE_COUNT-1)
+  bool tampDone;           // all buckets pressed this run -> next RUN_INDEX locks + opens
+  bool lockTampPress;      // lock is doing the partial 75% bucket press right now
   bool homed;              // detent reference captured (mirror of MotorInterface::homeSet())
   uint16_t ntcAdc;
   bool fanEnabled;
@@ -226,6 +235,8 @@ inline bool gantryLockEngaged(SystemState state) {
     case STATE_ROTATE_RELEASE:   // releasing so the gantry can be indexed
     case STATE_ROTATE_MOVING:    // motor is moving the gantry to the next tube
     case STATE_RUN_INDEX:        // post-spin: crawling to the nearest detent before re-lock
+    case STATE_RUN_TAMP_MOVE:    // bucket-tamp pass: not at a detent, must stay unlocked
+    case STATE_RUN_TAMP_PRESS:   // (the partial press is driven separately via lockTampPress)
       return false;   // released (spinning / about to spin / coasting / indexing)
     default:
       return true;    // locked (idle, powered on/off, closing, engaging, opening, fault)

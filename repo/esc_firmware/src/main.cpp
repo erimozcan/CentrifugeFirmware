@@ -160,7 +160,10 @@
 // Closed-loop angle control (SimpleFOC MotionControlType::angle) drives to an ABSOLUTE
 // tube angle using the AS5047P. Tube 0 = the shaft angle at power-on (the operator homes
 // the gantry to a detent first); tubes 1-3 at +90/180/270 deg. The mechanical detent +
-// lock taper pin give the final precision within a detent. Verb: `INDEX <0-3>`.
+// lock taper pin give the final precision within a detent. Verb: `INDEX <0-7>`:
+// 0-3 = tube detents; 4-7 = the MIDPOINT after detent n-4 (+45 deg), where a bucket sits
+// under the lock pin -- used by the master's post-run bucket-tamp pass. Half-detent
+// targets have no mechanical capture, so the ESC's hold does all the positioning there.
 #define TUBE_COUNT        4
 #define TUBE_STEP_RAD     (REV / TUBE_COUNT)    // 90 deg per tube (direct 1:1 drive)
 // INDEX is a VELOCITY-mode crawl, not a position servo: a position loop closed through
@@ -342,7 +345,7 @@ static const uint8_t CAL_RPM_STEP_COUNT = sizeof(CAL_RPM_STEPS) / sizeof(CAL_RPM
 enum IndexPhase { IDX_APPROACH = 0, IDX_SETTLE, IDX_HOLD };
 static bool  index_mode    = false;  // true = crawl move/hold to a tube in progress
 static bool  index_arrived = false;  // settled within tolerance (or retries exhausted)
-static int   index_tube    = 0;      // last commanded tube (0..TUBE_COUNT-1)
+static int   index_tube    = 0;      // last commanded slot (0..2*TUBE_COUNT-1; >=TUBE_COUNT = half-detent)
 static float index_target  = 0.0f;   // target cumulative angle (rad)
 static IndexPhase idx_phase = IDX_APPROACH;
 static uint8_t  idx_retries = 0;     // correction passes taken this move
@@ -715,9 +718,11 @@ static void linkHome() {
   Serial.print("OK HOME "); Serial.println(home_ref_rad, 4);
 }
 
-// Crawl move to a tube position (0..TUBE_COUNT-1). The gantry MUST be unlocked before
-// this (the Due sequences that). Bidirectional shortest path; on settled arrival it
-// holds (velocity 0) until the Due locks the gantry and sends STOP to disarm.
+// Crawl move to a tube position (0..TUBE_COUNT-1) or a half-detent (TUBE_COUNT..
+// 2*TUBE_COUNT-1 = midpoint after detent n-TUBE_COUNT; bucket-tamp pass). The gantry
+// MUST be unlocked before this (the Due sequences that). Bidirectional shortest path;
+// on settled arrival it holds (velocity 0) until the Due locks the gantry (or finishes
+// its tamp press) and sends STOP to disarm.
 static void linkIndex(int tube) {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
   // A motion verb supersedes any lingering calibration state -- otherwise the CAL
@@ -726,7 +731,7 @@ static void linkIndex(int tube) {
   if (calibrationRunning() || cal_state == CAL_DONE) {
     abortCalibration("superseded", CAL_IDLE);
   }
-  tube = ((tube % TUBE_COUNT) + TUBE_COUNT) % TUBE_COUNT;
+  tube = ((tube % (2 * TUBE_COUNT)) + 2 * TUBE_COUNT) % (2 * TUBE_COUNT);
   // A re-sent INDEX for the SAME tube while the move/hold is live is a KEEP-ALIVE, not
   // a restart: the master re-sends until arrival (dropped-line robustness), and
   // restarting the crawl each time races the settle dwell so arrival never latches
@@ -746,8 +751,11 @@ static void linkIndex(int tube) {
   if (!armed) arm();                   // aligns on the first arm (needs bus power)
   if (!armed) { Serial.println("ERR INDEX not armed (bus power? align failed)"); return; }
 
-  // Shortest move to the tube's ABSOLUTE detent angle (home_ref_rad = tube 0's detent).
-  float target_mech = _normalizeAngle(home_ref_rad + (float)tube * TUBE_STEP_RAD);
+  // Shortest move to the target's ABSOLUTE angle (home_ref_rad = tube 0's detent).
+  // Slots >= TUBE_COUNT are the half-detents: (n - TUBE_COUNT) + 0.5 steps.
+  float steps = (tube < TUBE_COUNT) ? (float)tube
+                                    : ((float)(tube - TUBE_COUNT) + 0.5f);
+  float target_mech = _normalizeAngle(home_ref_rad + steps * TUBE_STEP_RAD);
   float cur = encoder.getAngle();                  // cumulative rad
   float delta = target_mech - _normalizeAngle(cur);
   while (delta >  _PI) delta -= _2PI;              // shortest path, [-pi, pi]
@@ -1138,7 +1146,7 @@ static void handleLine(char *line) {
     case '?': printStat(); break;
     case 'h': case 'H':
       Serial.println("cmds: 0/1/2/3/4=stage  g=arm  x=stop  v<n>=vel  a<n>=accel  s=ramp0  ?=stat");
-      Serial.println("link: SPIN <rpm>  INDEX <0-3>  STOP  ESTOP  PING  STATUS?  (Due-facing verbs)");
+      Serial.println("link: SPIN <rpm>  INDEX <0-7>  STOP  ESTOP  PING  STATUS?  (Due-facing verbs)");
       break;
     default:
       Serial.print("ERR unknown '"); Serial.print(c); Serial.println("' (h=help)");

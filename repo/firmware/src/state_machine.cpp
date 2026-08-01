@@ -71,6 +71,8 @@ bool isRunFanState(SystemState state) {
     case STATE_STOPPING:
     case STATE_RUN_SETTLE:
     case STATE_RUN_INDEX:
+    case STATE_RUN_TAMP_MOVE:
+    case STATE_RUN_TAMP_PRESS:
     case STATE_RUN_ENGAGE:
       return true;
     default:
@@ -224,12 +226,23 @@ void StateMachine::tick(
   updateFanControl(ctx, nowMs);
 
   motor.setCommandOutputEnabled(ctx.commandOutputEnabled);
-  bool indexingState = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_RUN_INDEX);
+  bool indexingState = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_RUN_INDEX ||
+                        ctx.state == STATE_RUN_TAMP_MOVE || ctx.state == STATE_RUN_TAMP_PRESS);
 #ifdef ROTATE_VIA_INDEX
   // ESC-native closed-loop position (needs the updated ESC firmware).
   if (indexingState || ctx.state == STATE_ROTATE_ENGAGE) {
     // RUN_INDEX targets tube 1's detent (any detent is lockable); ROTATE targets its tube.
-    uint8_t escTube = (ctx.state == STATE_RUN_INDEX) ? 0U : (ctx.rotateTube - 1U);
+    // The bucket-tamp pass targets the ESC's half-detent slots (INDEX 4..7 = midpoint
+    // after detent n-4) -- kept commanded through the press so the ESC holds the angle
+    // against the tamp force.
+    uint8_t escTube;
+    if (ctx.state == STATE_RUN_TAMP_MOVE || ctx.state == STATE_RUN_TAMP_PRESS) {
+      escTube = TUBE_COUNT + ctx.tampIndex;
+    } else if (ctx.state == STATE_RUN_INDEX) {
+      escTube = 0U;
+    } else {
+      escTube = ctx.rotateTube - 1U;
+    }
     motor.commandIndex(escTube);
   } else {
     motor.finishIndexIfNeeded();               // disarm the ESC angle-hold if we were indexing
@@ -275,7 +288,14 @@ void StateMachine::tick(
     ctx.lockActuatorCommanded = false;
   }
 
-  guard.updateLockActuator(ctx.lockActuatorCommanded);
+  // Bucket-tamp press: partial 75% extend while parked at a half-detent (the ESC holds
+  // the angle). Press for TAMP_PRESS_MS on state entry, then retract for the remainder
+  // of the dwell. The same rpm safety net applies to the partial press.
+  ctx.lockTampPress = (ctx.state == STATE_RUN_TAMP_PRESS) &&
+                      !timeReached(nowMs, ctx.stateEntryMs + TAMP_PRESS_MS) &&
+                      (ctx.rpm1 < SAFE_UNLOCK_RPM);
+
+  guard.updateLockActuator(ctx.lockActuatorCommanded, ctx.lockTampPress);
   guard.updateDoorMotor(ctx.doorMotorCommand, ctx.doorPwmDuty);
   guard.updateFan(ctx.fanEnabled);
 }
@@ -317,7 +337,13 @@ bool StateMachine::isTransitionAllowed(SystemState from, SystemState to) {
     case STATE_RUN_SETTLE:
       return to == STATE_RUN_INDEX;     // index to a detent before re-locking
     case STATE_RUN_INDEX:
-      return to == STATE_RUN_ENGAGE;
+      return to == STATE_RUN_TAMP_MOVE ||  // first pass: tamp the buckets before locking
+             to == STATE_RUN_ENGAGE;       // second pass (tamp done): lock + open
+    case STATE_RUN_TAMP_MOVE:
+      return to == STATE_RUN_TAMP_PRESS;
+    case STATE_RUN_TAMP_PRESS:
+      return to == STATE_RUN_TAMP_MOVE ||  // next bucket
+             to == STATE_RUN_INDEX;        // all buckets pressed -> re-index to a detent
     case STATE_RUN_ENGAGE:
       return to == STATE_RUN_OPENING;
     case STATE_RUN_OPENING:
@@ -376,6 +402,8 @@ void StateMachine::applyPendingCommand(SystemContext &ctx, const PendingCommand 
     sanitizeProfile(ctx.activeProfile);
     ctx.currentTube = 0U;   // a spin leaves the gantry at an unknown position
     ctx.lockManualOverride = false;   // auto policy governs the lock during a run
+    ctx.tampIndex = 0U;     // fresh bucket-tamp pass at the end of this run
+    ctx.tampDone = false;
     transitionTo(ctx, STATE_RUN_CLOSING, nowMs);
   }
 
@@ -545,16 +573,59 @@ void StateMachine::applyStateProgression(SystemContext &ctx, MotorInterface &mot
       break;
 
     case STATE_RUN_INDEX:
-      // Crawl to the nearest detent (tick() drives it), then re-engage the lock.
+      // Crawl to the nearest detent (tick() drives it). First arrival starts the
+      // bucket-tamp pass; the second (tamp done) re-engages the lock as before.
 #ifdef ROTATE_VIA_INDEX
       if (motor.indexArrived()) {
 #else
       if (motor.velocityRotateArrived()) {
 #endif
         ctx.currentTube = motor.arrivedTube();
-        transitionTo(ctx, STATE_RUN_ENGAGE, nowMs);
+        if (ctx.tampDone) {
+          transitionTo(ctx, STATE_RUN_ENGAGE, nowMs);
+        } else {
+          ctx.tampIndex = 0U;
+#ifndef ROTATE_VIA_INDEX
+          motor.startRotateToHalfDetent(ctx.tampIndex);
+#endif
+          transitionTo(ctx, STATE_RUN_TAMP_MOVE, nowMs);
+        }
       } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {
         enterHardStop(ctx, FAULT_ROTATE_TIMEOUT, nowMs);
+      }
+      break;
+
+    case STATE_RUN_TAMP_MOVE:
+      // Gantry heading to the half-detent (tick() drives it); press once parked there.
+#ifdef ROTATE_VIA_INDEX
+      if (motor.indexArrived()) {
+#else
+      if (motor.velocityRotateArrived()) {
+#endif
+        transitionTo(ctx, STATE_RUN_TAMP_PRESS, nowMs);
+      } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {
+        enterHardStop(ctx, FAULT_ROTATE_TIMEOUT, nowMs);
+      }
+      break;
+
+    case STATE_RUN_TAMP_PRESS:
+      // tick() drives the press itself (75% for TAMP_PRESS_MS, then retracted for
+      // TAMP_RETRACT_MS); once the pin is clear, move to the next bucket or finish.
+      if (timeReached(nowMs, ctx.stateEntryMs + TAMP_PRESS_MS + TAMP_RETRACT_MS)) {
+        if (ctx.tampIndex + 1U < TUBE_COUNT) {
+          ctx.tampIndex++;
+#ifndef ROTATE_VIA_INDEX
+          motor.startRotateToHalfDetent(ctx.tampIndex);
+#endif
+          transitionTo(ctx, STATE_RUN_TAMP_MOVE, nowMs);
+        } else {
+          ctx.tampDone = true;
+#ifndef ROTATE_VIA_INDEX
+          motor.startRotateToNearestDetent();
+#endif
+          ctx.rotateDeadlineMs = nowMs + ROTATE_MOVE_TIMEOUT_MS;
+          transitionTo(ctx, STATE_RUN_INDEX, nowMs);
+        }
       }
       break;
 
@@ -797,6 +868,11 @@ void StateMachine::transitionTo(SystemContext &ctx, SystemState next, uint32_t n
       setRampTarget(ctx, 0, 0);   // ensure the target is a hard stop
       ctx.doorMotorCommand = DOOR_MOTOR_STOP;
       ctx.doorMoveActive = false;
+      break;
+
+    case STATE_RUN_TAMP_MOVE:
+      // tick() streams INDEX to the half-detent; arm the arrival timeout.
+      ctx.rotateDeadlineMs = nowMs + ROTATE_MOVE_TIMEOUT_MS;
       break;
 
     case STATE_RUN_ENGAGE:

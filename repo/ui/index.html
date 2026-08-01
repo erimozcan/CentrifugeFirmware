@@ -457,7 +457,8 @@ let lastStatus = null;
 
 const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN RAMP','SPIN HOLD','STOPPING','HARD STOP','FAULT',
   'CLOSING','UNLOCKING','SETTLING','LOCKING','OPENING',      // 10-14 run cycle
-  'UNLOCKING','ROTATING','LOCKING','INDEXING'];               // 15-18 rotate / post-spin index
+  'UNLOCKING','ROTATING','LOCKING','INDEXING',                // 15-18 rotate / post-spin index
+  'TAMP MOVE','TAMPING'];                                     // 19-20 post-run bucket tamp (door closed)
 const FAULT_NAMES = ['none','illegal state','bad command','hard stop','lock timeout','door invalid',
   'door open in spin','door timeout','over temp','interlock unsafe','rotate timeout'];
 const SPIN_STATES = new Set([2,3,4,5,6,7]);      // rotor energised
@@ -687,7 +688,7 @@ function render(f) {
   document.querySelectorAll('.dial .pos').forEach(p => p.style.pointerEvents = STOPPED(st) ? 'auto' : 'none');
 
   // ---- centrifuge panel ----
-  const running = SPIN_STATES.has(st) || ROTATE_STATES.has(st) || (st>=10 && st<=14);
+  const running = SPIN_STATES.has(st) || ROTATE_STATES.has(st) || (st>=10 && st<=14) || st===19 || st===20;
   chip($('runChip'), running ? (STATE_NAMES[st]||'run') : (st===1?'ready':st===0?'stand-by':'—'),
        running?'run':st===1?'good':'');
   $('btnRun').disabled   = !(st===0 || st===1);

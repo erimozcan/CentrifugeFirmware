@@ -13,7 +13,7 @@ class HardwareGuard {
  public:
   void begin();
   void updateMotorEnable(SystemState state);
-  void updateLockActuator(bool engaged);
+  void updateLockActuator(bool engaged, bool tampPress);
   void updateFan(bool enabled);
   void updateDoorMotor(DoorMotorCommand command, uint8_t runDuty);
 

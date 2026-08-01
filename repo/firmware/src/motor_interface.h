@@ -29,6 +29,8 @@ class MotorInterface {
   bool homeSet() const;
   void startRotateToTube(uint8_t tube);   // crawl to tube 1..TUBE_COUNT (absolute detent)
   void startRotateToNearestDetent();      // crawl to the nearest detent (post-spin re-lock)
+  void startRotateToHalfDetent(uint8_t k); // crawl to the midpoint after detent k (0..N-1),
+                                           // where the bucket sits under the lock pin (tamp)
   void updateVelocityRotate();            // call each tick during the move (drives SPIN + polls)
   bool velocityRotateArrived() const;
   void endVelocityRotate();               // stop + reset (idempotent)
