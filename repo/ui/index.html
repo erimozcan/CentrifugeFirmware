@@ -458,7 +458,7 @@ let lastStatus = null;
 const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN RAMP','SPIN HOLD','STOPPING','HARD STOP','FAULT',
   'CLOSING','UNLOCKING','SETTLING','LOCKING','OPENING',      // 10-14 run cycle
   'UNLOCKING','ROTATING','LOCKING','INDEXING',                // 15-18 rotate / post-spin index
-  'TAMP MOVE','TAMPING'];                                     // 19-20 post-run bucket tamp (door closed)
+  'SWEEP SET','SWEEPING'];                                    // 19-20 post-run bucket sweep (door closed)
 const FAULT_NAMES = ['none','illegal state','bad command','hard stop','lock timeout','door invalid',
   'door open in spin','door timeout','over temp','interlock unsafe','rotate timeout'];
 const SPIN_STATES = new Set([2,3,4,5,6,7]);      // rotor energised

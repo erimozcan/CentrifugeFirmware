@@ -71,8 +71,8 @@ bool isRunFanState(SystemState state) {
     case STATE_STOPPING:
     case STATE_RUN_SETTLE:
     case STATE_RUN_INDEX:
-    case STATE_RUN_TAMP_MOVE:
-    case STATE_RUN_TAMP_PRESS:
+    case STATE_RUN_SWEEP_EXTEND:
+    case STATE_RUN_SWEEP_TURN:
     case STATE_RUN_ENGAGE:
       return true;
     default:
@@ -227,22 +227,21 @@ void StateMachine::tick(
 
   motor.setCommandOutputEnabled(ctx.commandOutputEnabled);
   bool indexingState = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_RUN_INDEX ||
-                        ctx.state == STATE_RUN_TAMP_MOVE || ctx.state == STATE_RUN_TAMP_PRESS);
+                        ctx.state == STATE_RUN_SWEEP_EXTEND);
+  if (ctx.state == STATE_RUN_SWEEP_TURN) {
+    // Knockdown sweep: one slow full revolution with the lock's sweeper at 50%. Uses only
+    // SPIN + rev= telemetry, so it is the same on both rotate paths.
+    motor.updateSweepTurn();
+  } else {
+    motor.endSweepTurn();                      // no-op unless a sweep was cut short (abort/fault)
 #ifdef ROTATE_VIA_INDEX
   // ESC-native closed-loop position (needs the updated ESC firmware).
   if (indexingState || ctx.state == STATE_ROTATE_ENGAGE) {
-    // RUN_INDEX targets tube 1's detent (any detent is lockable); ROTATE targets its tube.
-    // The bucket-tamp pass targets the ESC's half-detent slots (INDEX 4..7 = midpoint
-    // after detent n-4) -- kept commanded through the press so the ESC holds the angle
-    // against the tamp force.
-    uint8_t escTube;
-    if (ctx.state == STATE_RUN_TAMP_MOVE || ctx.state == STATE_RUN_TAMP_PRESS) {
-      escTube = TUBE_COUNT + ctx.tampIndex;
-    } else if (ctx.state == STATE_RUN_INDEX) {
-      escTube = 0U;
-    } else {
-      escTube = ctx.rotateTube - 1U;
-    }
+    // RUN_INDEX targets tube 1's detent (any detent is lockable), and SWEEP_EXTEND keeps
+    // that same hold while the lock reaches its 50% extend; ROTATE targets its tube.
+    uint8_t escTube = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_ROTATE_ENGAGE)
+                          ? (ctx.rotateTube - 1U)
+                          : 0U;
     motor.commandIndex(escTube);
   } else {
     motor.finishIndexIfNeeded();               // disarm the ESC angle-hold if we were indexing
@@ -262,6 +261,7 @@ void StateMachine::tick(
     motor.sendVelocitySetpoint(ctx.rpmCmd);
   }
 #endif
+  }
 
   motor.drainRx();
   ctx.homed = motor.homeSet();
@@ -288,14 +288,14 @@ void StateMachine::tick(
     ctx.lockActuatorCommanded = false;
   }
 
-  // Bucket-tamp press: partial 75% extend while parked at a half-detent (the ESC holds
-  // the angle). Press for TAMP_PRESS_MS on state entry, then retract for the remainder
-  // of the dwell. The same rpm safety net applies to the partial press.
-  ctx.lockTampPress = (ctx.state == STATE_RUN_TAMP_PRESS) &&
-                      !timeReached(nowMs, ctx.stateEntryMs + TAMP_PRESS_MS) &&
+  // Bucket-sweep hold: 50% extend puts the sweeper extrusion into the buckets' path,
+  // held through the extend dwell AND the slow knockdown turn. The rpm safety net still
+  // wins -- the sweep crawls at SWEEP_TURN_RPM, well under SAFE_UNLOCK_RPM.
+  ctx.lockSweepHold = (ctx.state == STATE_RUN_SWEEP_EXTEND ||
+                       ctx.state == STATE_RUN_SWEEP_TURN) &&
                       (ctx.rpm1 < SAFE_UNLOCK_RPM);
 
-  guard.updateLockActuator(ctx.lockActuatorCommanded, ctx.lockTampPress);
+  guard.updateLockActuator(ctx.lockActuatorCommanded, ctx.lockSweepHold);
   guard.updateDoorMotor(ctx.doorMotorCommand, ctx.doorPwmDuty);
   guard.updateFan(ctx.fanEnabled);
 }
@@ -337,13 +337,12 @@ bool StateMachine::isTransitionAllowed(SystemState from, SystemState to) {
     case STATE_RUN_SETTLE:
       return to == STATE_RUN_INDEX;     // index to a detent before re-locking
     case STATE_RUN_INDEX:
-      return to == STATE_RUN_TAMP_MOVE ||  // first pass: tamp the buckets before locking
-             to == STATE_RUN_ENGAGE;       // second pass (tamp done): lock + open
-    case STATE_RUN_TAMP_MOVE:
-      return to == STATE_RUN_TAMP_PRESS;
-    case STATE_RUN_TAMP_PRESS:
-      return to == STATE_RUN_TAMP_MOVE ||  // next bucket
-             to == STATE_RUN_INDEX;        // all buckets pressed -> re-index to a detent
+      return to == STATE_RUN_SWEEP_EXTEND ||  // first pass: knockdown sweep before locking
+             to == STATE_RUN_ENGAGE;          // second pass (sweep done): lock + open
+    case STATE_RUN_SWEEP_EXTEND:
+      return to == STATE_RUN_SWEEP_TURN;
+    case STATE_RUN_SWEEP_TURN:
+      return to == STATE_RUN_INDEX;           // full turn done -> re-index to the detent
     case STATE_RUN_ENGAGE:
       return to == STATE_RUN_OPENING;
     case STATE_RUN_OPENING:
@@ -402,8 +401,7 @@ void StateMachine::applyPendingCommand(SystemContext &ctx, const PendingCommand 
     sanitizeProfile(ctx.activeProfile);
     ctx.currentTube = 0U;   // a spin leaves the gantry at an unknown position
     ctx.lockManualOverride = false;   // auto policy governs the lock during a run
-    ctx.tampIndex = 0U;     // fresh bucket-tamp pass at the end of this run
-    ctx.tampDone = false;
+    ctx.sweepDone = false;  // fresh bucket-knockdown sweep at the end of this run
     transitionTo(ctx, STATE_RUN_CLOSING, nowMs);
   }
 
@@ -574,58 +572,46 @@ void StateMachine::applyStateProgression(SystemContext &ctx, MotorInterface &mot
 
     case STATE_RUN_INDEX:
       // Crawl to the nearest detent (tick() drives it). First arrival starts the
-      // bucket-tamp pass; the second (tamp done) re-engages the lock as before.
+      // knockdown sweep; the second (sweep done) re-engages the lock as before.
 #ifdef ROTATE_VIA_INDEX
       if (motor.indexArrived()) {
 #else
       if (motor.velocityRotateArrived()) {
 #endif
         ctx.currentTube = motor.arrivedTube();
-        if (ctx.tampDone) {
+        if (ctx.sweepDone) {
           transitionTo(ctx, STATE_RUN_ENGAGE, nowMs);
         } else {
-          ctx.tampIndex = 0U;
-#ifndef ROTATE_VIA_INDEX
-          motor.startRotateToHalfDetent(ctx.tampIndex);
-#endif
-          transitionTo(ctx, STATE_RUN_TAMP_MOVE, nowMs);
+          // The detent hold carries through SWEEP_EXTEND; nothing to start yet.
+          transitionTo(ctx, STATE_RUN_SWEEP_EXTEND, nowMs);
         }
       } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {
         enterHardStop(ctx, FAULT_ROTATE_TIMEOUT, nowMs);
       }
       break;
 
-    case STATE_RUN_TAMP_MOVE:
-      // Gantry heading to the half-detent (tick() drives it); press once parked there.
-#ifdef ROTATE_VIA_INDEX
-      if (motor.indexArrived()) {
-#else
-      if (motor.velocityRotateArrived()) {
-#endif
-        transitionTo(ctx, STATE_RUN_TAMP_PRESS, nowMs);
-      } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {
-        enterHardStop(ctx, FAULT_ROTATE_TIMEOUT, nowMs);
+    case STATE_RUN_SWEEP_EXTEND:
+      // Parked at the detent; tick() raises the 50% hold on entry. Dwell for the
+      // open-loop actuator to reach it, then start the knockdown revolution.
+      if (timeReached(nowMs, ctx.stateEntryMs + SWEEP_EXTEND_MS)) {
+        motor.startSweepTurn();
+        transitionTo(ctx, STATE_RUN_SWEEP_TURN, nowMs);
       }
       break;
 
-    case STATE_RUN_TAMP_PRESS:
-      // tick() drives the press itself (75% for TAMP_PRESS_MS, then retracted for
-      // TAMP_RETRACT_MS); once the pin is clear, move to the next bucket or finish.
-      if (timeReached(nowMs, ctx.stateEntryMs + TAMP_PRESS_MS + TAMP_RETRACT_MS)) {
-        if (ctx.tampIndex + 1U < TUBE_COUNT) {
-          ctx.tampIndex++;
+    case STATE_RUN_SWEEP_TURN:
+      // tick() drives the slow revolution; every bucket is knocked flat as it passes
+      // the sweeper. On completion, re-index to the detent and lock as normal.
+      if (motor.sweepTurnDone()) {
+        motor.endSweepTurn();   // restore spin gains BEFORE arming the re-index crawl
+        ctx.sweepDone = true;
 #ifndef ROTATE_VIA_INDEX
-          motor.startRotateToHalfDetent(ctx.tampIndex);
+        motor.startRotateToNearestDetent();
 #endif
-          transitionTo(ctx, STATE_RUN_TAMP_MOVE, nowMs);
-        } else {
-          ctx.tampDone = true;
-#ifndef ROTATE_VIA_INDEX
-          motor.startRotateToNearestDetent();
-#endif
-          ctx.rotateDeadlineMs = nowMs + ROTATE_MOVE_TIMEOUT_MS;
-          transitionTo(ctx, STATE_RUN_INDEX, nowMs);
-        }
+        ctx.rotateDeadlineMs = nowMs + ROTATE_MOVE_TIMEOUT_MS;
+        transitionTo(ctx, STATE_RUN_INDEX, nowMs);
+      } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {
+        enterHardStop(ctx, FAULT_ROTATE_TIMEOUT, nowMs);
       }
       break;
 
@@ -870,8 +856,8 @@ void StateMachine::transitionTo(SystemContext &ctx, SystemState next, uint32_t n
       ctx.doorMoveActive = false;
       break;
 
-    case STATE_RUN_TAMP_MOVE:
-      // tick() streams INDEX to the half-detent; arm the arrival timeout.
+    case STATE_RUN_SWEEP_TURN:
+      // tick() drives the slow revolution; arm its completion timeout.
       ctx.rotateDeadlineMs = nowMs + ROTATE_MOVE_TIMEOUT_MS;
       break;
 

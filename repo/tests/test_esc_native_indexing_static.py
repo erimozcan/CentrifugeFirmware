@@ -24,11 +24,9 @@ def test_esc_has_home_verb_and_homed_index_reference():
     assert 'strcmp(tok, "HOME")' in src
     assert "linkHome" in src
     assert "home_ref_rad" in src
-    # INDEX targets are relative to the homed detent reference, not raw power-on zero,
-    # and slots >= TUBE_COUNT map to the half-detent midpoints (bucket-tamp pass).
+    # INDEX targets are relative to the homed detent reference, not raw power-on zero.
     index_body = src[src.index("static void linkIndex"):src.index("static void linkEstop")]
-    assert "home_ref_rad + steps * TUBE_STEP_RAD" in index_body
-    assert "(float)(tube - TUBE_COUNT) + 0.5f" in index_body
+    assert "home_ref_rad + (float)tube * TUBE_STEP_RAD" in index_body
 
 
 def test_esc_index_uses_crawl_torque_and_restores_spin_profile():

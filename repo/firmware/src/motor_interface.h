@@ -29,8 +29,14 @@ class MotorInterface {
   bool homeSet() const;
   void startRotateToTube(uint8_t tube);   // crawl to tube 1..TUBE_COUNT (absolute detent)
   void startRotateToNearestDetent();      // crawl to the nearest detent (post-spin re-lock)
-  void startRotateToHalfDetent(uint8_t k); // crawl to the midpoint after detent k (0..N-1),
-                                           // where the bucket sits under the lock pin (tamp)
+
+  // Post-run bucket sweep: one slow full forward revolution (SWEEP_REV_TARGET) while the
+  // state machine holds the lock's sweeper extrusion at 50%. Build-agnostic: uses only
+  // SPIN + the "?"-polled STAT rev= telemetry, so it works with either rotate path.
+  void startSweepTurn();                  // disarms any index hold, applies crawl torque
+  void updateSweepTurn();                 // call each tick during STATE_RUN_SWEEP_TURN
+  bool sweepTurnDone() const;             // full rev covered and the rotor has settled
+  void endSweepTurn();                    // stop + restore spin gains (idempotent)
   void updateVelocityRotate();            // call each tick during the move (drives SPIN + polls)
   bool velocityRotateArrived() const;
   void endVelocityRotate();               // stop + reset (idempotent)
@@ -92,6 +98,12 @@ class MotorInterface {
   float detentRef_ = 0.0f;
   bool homeSet_ = false;
   bool homePending_ = false;
+
+  // Bucket-sweep turn state (progress measured on the ESC's cumulative rev= telemetry).
+  enum SweepPhase { SWEEP_INACTIVE = 0, SWEEP_ACQUIRE, SWEEP_TURNING, SWEEP_SETTLING, SWEEP_DONE };
+  SweepPhase sweepPhase_ = SWEEP_INACTIVE;
+  float sweepStartRev_ = 0.0f;
+  bool sweepRevSeen_ = false;    // a rev= reading arrived since the sweep started
 
   void txSpin(int32_t rpm);
   void txIndex(uint8_t escTube);

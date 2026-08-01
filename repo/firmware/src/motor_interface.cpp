@@ -36,6 +36,7 @@ void MotorInterface::begin() {
   indexArrived_ = false;
   lastIndexTube_ = -1;
   rotPhase_ = ROT_INACTIVE;
+  sweepPhase_ = SWEEP_INACTIVE;
   homeSet_ = false;
   homePending_ = true;   // auto-capture the detent reference from the startup (homed) position
 }
@@ -235,14 +236,70 @@ void MotorInterface::startRotateToNearestDetent() {
   applyRotateTuning();
 }
 
-void MotorInterface::startRotateToHalfDetent(uint8_t k) {
-  rotNearest_ = false;
-  rotTargetFrac_ = mod1(detentRef_ +
-                        (static_cast<float>(k) + 0.5f) / static_cast<float>(TUBE_COUNT));
-  rotPhase_ = ROT_ACQUIRE;
-  rotSeen_ = false;
+// ---- Post-run bucket-sweep turn ------------------------------------------------------
+// One slow full forward revolution; the state machine holds the lock's sweeper extrusion
+// at 50% so every bucket is knocked flat as it passes. Progress is measured on the ESC's
+// CUMULATIVE rev= (encoder revs since ESC boot -- persists across arm/disarm), so a
+// circular-angle target can't be used (start == end mod 1). Universal verbs only.
+void MotorInterface::startSweepTurn() {
+  finishIndexIfNeeded();     // an ESC INDEX hold must be disarmed (STOP) before SPIN
+  sweepPhase_ = SWEEP_ACQUIRE;
+  sweepRevSeen_ = false;     // a stale rev= must not seed the start point
   rotPollMs_ = 0U;
-  applyRotateTuning();
+  applyRotateTuning();       // crawl-profile torque so the slow turn doesn't stall
+}
+
+void MotorInterface::updateSweepTurn() {
+  uint32_t now = millis();
+  if ((uint32_t)(now - rotPollMs_) >= ROTATE_POLL_MS) {
+    txLiteral("?");          // STAT rev= drives the turn progress
+    rotPollMs_ = now;
+  }
+
+  int32_t rpm = 0;
+  if (sweepRevSeen_) {
+    switch (sweepPhase_) {
+      case SWEEP_ACQUIRE:
+        sweepStartRev_ = measuredRev_;
+        sweepPhase_ = SWEEP_TURNING;
+        break;
+      case SWEEP_TURNING:
+        if (measuredRev_ - sweepStartRev_ >= SWEEP_REV_TARGET) {
+          rotLastRev_ = measuredRev_;
+          rotStableMs_ = now;
+          sweepPhase_ = SWEEP_SETTLING;   // cut drive; wait until truly at rest
+        } else {
+          rpm = SWEEP_TURN_RPM;
+        }
+        break;
+      case SWEEP_SETTLING:
+        if (fabsf(measuredRev_ - rotLastRev_) > ROTATE_STABLE_REV) {
+          rotLastRev_ = measuredRev_;     // still coasting -> restart the stable timer
+          rotStableMs_ = now;
+        } else if ((uint32_t)(now - rotStableMs_) >= ROTATE_SETTLE_MS) {
+          sweepPhase_ = SWEEP_DONE;
+        }
+        break;
+      case SWEEP_DONE:
+      case SWEEP_INACTIVE:
+      default:
+        break;
+    }
+  }
+  sendVelocitySetpoint(rpm);   // SPIN at the crawl or STOP; also feeds the ESC watchdog
+}
+
+bool MotorInterface::sweepTurnDone() const {
+  return sweepPhase_ == SWEEP_DONE;
+}
+
+void MotorInterface::endSweepTurn() {
+  if (sweepPhase_ == SWEEP_INACTIVE) {
+    return;
+  }
+  sweepPhase_ = SWEEP_INACTIVE;
+  sendVelocitySetpoint(0);   // ensure the ESC is stopped
+  applyEscTuning();          // restore the soft spin gains (undo the crawl boost)
 }
 
 void MotorInterface::updateVelocityRotate() {
@@ -397,9 +454,11 @@ void MotorInterface::parseEscLine(const char *line) {
       measuredFrac_ = static_cast<float>(atof(a + 4)) * (1.0f / 6.2831853f);
       rotSeen_ = true;
     }
-    const char *r = strstr(line, "rev=");   // cumulative revs (motion/settle detection)
+    const char *r = strstr(line, "rev=");   // cumulative revs (motion/settle + sweep progress)
     if (r != nullptr) {
       measuredRev_ = static_cast<float>(atof(r + 4));
+      sweepRevSeen_ = true;   // ST pos= also sets rotSeen_, so the sweep needs its own
+                              // "rev is fresh" flag or it could seed from a stale value
     }
     return;
   }
