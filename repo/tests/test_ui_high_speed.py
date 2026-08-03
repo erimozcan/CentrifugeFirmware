@@ -28,9 +28,18 @@ def test_ui_full_range_is_default_after_validation():
         assert "RUN_RPM_LIMITS" not in html, f"{ui_file} still has dual-mode RPM limits"
 
 
-def test_ui_rcf_max_matches_validated_rpm_ceiling():
-    # MAX_RCF must DERIVE from the validated RPM ceiling (floor keeps rpm <= cap),
-    # never a hand-typed number that could drift from the firmware clamp.
+def test_ui_rcf_operator_cap_is_under_the_rpm_ceiling():
+    # MAX_RCF is an OPERATOR cap (6000 x g for now, 2026-08-03), deliberately below
+    # the validated hardware ceiling (~8452 at 12000 RPM). It must stay under that
+    # ceiling so the RPM it maps to (~10.1k) never exceeds the firmware clamp, and
+    # the input field's max attribute must match the JS cap.
+    import re
+    rcf_per_rpm2 = 1.118e-5 * 5.25          # mirrors the UI's RCF_PER_RPM2 (r=52.5 mm)
     for ui_file in UI_FILES:
         html = ui_file.read_text(encoding="utf-8")
-        assert "Math.floor(rpmToRcf(MAX_RUN_RPM))" in html, f"{ui_file} MAX_RCF not derived"
+        m = re.search(r"const MAX_RCF = (\d+);", html)
+        assert m, f"{ui_file} MAX_RCF not a literal cap"
+        cap = int(m.group(1))
+        assert cap == 6000, f"{ui_file} unexpected operator cap {cap}"
+        assert (cap / rcf_per_rpm2) ** 0.5 <= 12000, f"{ui_file} cap exceeds the RPM ceiling"
+        assert f'id="inRcf" value="1000" min="0" max="{cap}"' in html, f"{ui_file} field max drifted"

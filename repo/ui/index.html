@@ -323,7 +323,7 @@
       <h2>Centrifuge <span class="statechip" id="runChip">—</span></h2>
       <div class="sub">Set the speed and time, then run. Arming is automatic.</div>
       <div class="fields">
-        <label class="field">Force<input type="number" id="inRcf" value="1000" min="0" max="8452" step="50"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">× g · max 8452 (12k RPM @ r 52.5 mm)</span></label>
+        <label class="field">Force<input type="number" id="inRcf" value="1000" min="0" max="6000" step="50"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">× g · max 6000 (operator cap, ~10.1k RPM)</span></label>
         <label class="field">Time<input type="number" id="inTime" value="10" min="0" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds hold</span></label>
         <label class="field">Ramp<input type="number" id="inRamp" value="120" min="1" max="600"><span style="font:500 10px Inter;color:var(--txt3);text-transform:none;letter-spacing:0">seconds</span></label>
       </div>
@@ -450,7 +450,7 @@ const RCF_PER_RPM2 = 1.118e-5 * (ROTOR_RADIUS_MM / 10);          // r in cm
 const rpmToRcf = rpm => RCF_PER_RPM2 * rpm * rpm;
 const rcfToRpm = rcf => Math.sqrt(Math.max(0, rcf) / RCF_PER_RPM2);
 const MAX_RUN_RPM = 12000;
-const MAX_RCF = Math.floor(rpmToRcf(MAX_RUN_RPM));               // 8452
+const MAX_RCF = 6000;   // operator cap for now (hardware ceiling ~8452 at 12000 RPM)
 let port=null, reader=null, writer=null, keepReading=false, seq=0, rxBuf='';
 const pending = new Map();
 let lastStatus = null;
