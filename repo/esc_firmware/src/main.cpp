@@ -180,6 +180,13 @@
                                                 // friction gantry this had to be ~27 RPM so
                                                 // the P-term could hold breakaway -- if
                                                 // friction ever returns, revisit.)
+#define INDEX_ACCEL_RADPS2  (1.0f * REV)        // approach accel limit (jerk guard): 0 -> FAST
+                                                // in ~0.5 s. Stepping the crawl setpoint
+                                                // 0 -> FAST launched the gantry hard enough
+                                                // to slosh loaded buckets (bench 2026-08-03).
+                                                // SPEED-UPS only: slow-downs and the stop cut
+                                                // stay immediate so the landing is unchanged,
+                                                // and the stiction kick bypasses it by design.
 #define INDEX_COARSE_RAD    (0.11f * REV)       // creep inside this distance (~40 deg)
 #define INDEX_STOP_LEAD_RAD (0.008f * REV)      // cut drive ~3 deg early; coast covers it
 #define INDEX_DONE_TOL_RAD  (0.014f * REV)      // accept within ~5 deg (lock capture is 10-20)
@@ -349,6 +356,8 @@ static uint8_t  idx_retries = 0;     // correction passes taken this move
 static uint32_t idx_settle_ms = 0;   // settle-dwell start
 static uint32_t idx_stall_ms = 0;    // last time the approach was actually moving
 static uint32_t idx_kick_until = 0;  // active stiction-kick pulse deadline (0 = none)
+static float    idx_ramp_vel = 0.0f; // slew-limited approach setpoint (jerk guard)
+static uint32_t idx_ramp_us  = 0;    // last slew update (micros)
 
 static float cmd_vel   = 0.0f;       // requested final velocity (rad/s)
 static float ramp_vel  = 0.0f;       // ramped setpoint actually commanded
@@ -759,6 +768,8 @@ static void linkIndex(int tube) {
   idx_retries   = 0;
   idx_stall_ms  = millis();
   idx_kick_until = 0;
+  idx_ramp_vel  = 0.0f;      // every move launches from rest through the jerk guard
+  idx_ramp_us   = micros();
   stop_then_disarm = false;
   // Run the move on the CRAWL profile with the INDEX torque ceiling (disarm() restores
   // SPIN + the global current limit). PID_velocity.limit must be set explicitly --
@@ -1297,10 +1308,30 @@ void loop() {
                 idx_stall_ms = nowms;     // fresh stall window after each pulse
               }
             }
-            motor.move((ierr > 0.0f) ? sp : -sp);
+            // Jerk guard: slew SPEED-UPS toward the wanted crawl velocity at
+            // INDEX_ACCEL_RADPS2 instead of stepping (see the define). Slow-downs
+            // (FAST->SLOW handoff) stay immediate to protect the landing, and an
+            // active kick pulse gets its full step -- it exists to break a stall.
+            float want = (ierr > 0.0f) ? sp : -sp;
+            uint32_t idx_now_us = micros();
+            float idt = (idx_now_us - idx_ramp_us) * 1e-6f;
+            idx_ramp_us = idx_now_us;
+            if (idt < 0.0f || idt > 0.1f) idt = 0.0f;    // first pass / absurd dt
+            bool sameDir = (want >= 0.0f) == (idx_ramp_vel >= 0.0f);
+            if (idx_kick_until != 0) {
+              idx_ramp_vel = want;
+            } else if (sameDir && fabsf(want) < fabsf(idx_ramp_vel)) {
+              idx_ramp_vel = want;
+            } else {
+              float step = INDEX_ACCEL_RADPS2 * idt;
+              if (want > idx_ramp_vel) idx_ramp_vel = fminf(idx_ramp_vel + step, want);
+              else                     idx_ramp_vel = fmaxf(idx_ramp_vel - step, want);
+            }
+            motor.move(idx_ramp_vel);
           }
           break;
         case IDX_SETTLE:
+          idx_ramp_vel = 0.0f;   // next approach (a correction pass) starts from rest
           motor.move(0.0f);
           if (fabsf(encoder.getVelocity()) > INDEX_SETTLE_VEL) {
             idx_settle_ms = millis();               // still coasting -- restart the dwell
