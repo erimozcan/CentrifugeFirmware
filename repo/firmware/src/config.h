@@ -284,10 +284,12 @@
 // Door motor drive shaping (shared Due/Nano): a brief KICK to break the N20 worm-gear
 // static friction, then settle to a slow PWM run. All duties are 0-255.
 #define DOOR_KICK_MS      90U    // kick duration (shorter = less lunge at start)
-#define DOOR_KICK_DUTY    150    // kick strength (~59%); raised from 125 (2026-07-21,
-                                 // +20% door power request) -- lower = gentler kick
-#define DOOR_PWM_DUTY     192    // run duty (~75%) after the kick; raised from 160
+#define DOOR_KICK_DUTY    170    // kick strength (~67%); raised from 150 (2026-08-03,
+                                 // more door strength request) -- lower = gentler kick
+#define DOOR_PWM_DUTY     220    // run duty (~86%) after the kick; raised from 192
                                  // (same request). DOOR_SPEED verb still overrides live.
+                                 // Duty 255 == the N20's full 12 V rating (VM-rescaled),
+                                 // so ~15% headroom remains before the motor's ceiling.
 // Motor direction vs the door mechanism. Set to 1 if OPEN/CLOSE drive the wrong way
 // (swaps the DRV8871 outputs in firmware instead of rewiring OUT1/OUT2).
 #define DOOR_DIR_INVERT   1
