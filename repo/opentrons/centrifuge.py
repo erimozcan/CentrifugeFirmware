@@ -178,14 +178,17 @@ class Centrifuge(object):
             ser.port = path
             ser.baudrate = BAUD
             ser.timeout = 0.2
-            # Opening a USB-CDC port can reset the ESP32; don't assert the lines.
-            ser.dtr = False
-            ser.rts = False
+            # DTR MUST be asserted. The Nano ESP32 is native USB CDC (not a UART bridge)
+            # and the S3 gates its transmit on the host's DTR line state: with DTR low the
+            # device still accepts commands but every reply is discarded, which looks
+            # exactly like "wrong port" (bench-verified 2026-08-04).
+            ser.dtr = True
             try:
                 ser.open()
             except Exception as exc:                        # busy, permissions, vanished
                 errors.append("%s: %s" % (path, exc))
                 continue
+            time.sleep(0.3)                                 # let the CDC endpoint settle
 
             self._ser = ser
             self._seq = 0

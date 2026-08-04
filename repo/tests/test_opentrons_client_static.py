@@ -116,6 +116,16 @@ def test_controls_the_operator_ui_has_are_all_reachable():
         assert command in console, "console is missing %s" % command
 
 
+def test_client_asserts_dtr_on_the_native_usb_cdc_port():
+    # The Nano ESP32 is native USB CDC and the S3 gates TX on the host's DTR line: with
+    # DTR low the board accepts commands but every reply is discarded, which presents as
+    # "no centrifuge firmware on this port". Deasserting DTR to avoid a reset -- the
+    # intuitive thing to do -- silently breaks all communication (bench-verified).
+    client = read(CLIENT)
+    assert "ser.dtr = True" in client
+    assert "ser.dtr = False" not in client
+
+
 def test_client_refuses_force_above_the_operator_cap():
     class Offline(centrifuge.Centrifuge):
         def __init__(self):
