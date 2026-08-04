@@ -228,10 +228,13 @@
 
 // Automated full-cycle run choreography dwell times (the door close/open steps use
 // DOOR_MOVE_TIMEOUT_MS). The gantry lock is open-loop (no position sensor), so these give
-// the actuator time to physically move before the next step.
-#define RUN_RELEASE_MS   800U   // let the lock RETRACT (release the gantry) before spinning
+// the actuator time to physically move before the next step. STROKE MATH (2026-08-04):
+// the PQ12-63's full 20 mm stroke takes ~1.6 s no-load at its 15 mm/s max -- and the
+// shared 5 V rail runs the 6 V unit ~17% slow -- so the old 800 ms dwells started the
+// spin (and opened the door) with the pin only ~60% of the way through its travel.
+#define RUN_RELEASE_MS  2500U   // let the lock FULLY RETRACT (full 20 mm) before spinning
 #define RUN_SETTLE_MS   1500U   // dwell at 0 rpm so the rotor fully coasts to rest
-#define RUN_ENGAGE_MS    800U   // let the lock EXTEND (re-engage) before opening the door
+#define RUN_ENGAGE_MS   2500U   // let the lock FULLY EXTEND (seat) before opening the door
 
 // Post-run bucket-sweep pass: the buckets are too light to fold back down after a
 // spin, so before the final lock (door still closed) the lock extends HALFWAY --
@@ -240,7 +243,8 @@
 // short of the full rev so the re-index approaches the detent cleanly (forward on
 // the legacy crawl; either way for ESC INDEX), then the normal re-index + full
 // lock + door-open follow.
-#define SWEEP_EXTEND_MS   800U   // let the lock reach 50% before the turn starts
+#define SWEEP_EXTEND_MS  1500U   // let the lock reach 50% (10 mm, ~1 s at the 5 V rail's
+                                 // ~12.5 mm/s) before the turn starts
 #define SWEEP_TURN_RPM    30     // knockdown crawl speed (crawl profile; kept under
                                  // SAFE_UNLOCK_RPM so the rpm net never drops the hold)
 #define SWEEP_REV_TARGET  0.96f  // stop ~15 deg short of the full rev; the re-index

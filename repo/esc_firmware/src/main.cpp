@@ -336,7 +336,8 @@ static char cal_error[24] = "none";
 
 static const float CAL_RPM_STEPS[] = {500.0f, 1000.0f, 2000.0f, 3000.0f, 4000.0f};
 static const uint8_t CAL_RPM_STEP_COUNT = sizeof(CAL_RPM_STEPS) / sizeof(CAL_RPM_STEPS[0]);
-#define CAL_LOCK_RELEASE_MS        1500U  // dwell before align: master retracts the gantry lock
+#define CAL_LOCK_RELEASE_MS        2500U  // dwell before align: master retracts the gantry lock
+                                          // (full 20 mm PQ12 stroke takes ~2 s on its 5 V rail)
 #define CAL_ALIGN_TIMEOUT_MS       6000U  // includes the lock-release dwell
 #define CAL_ENCODER_CHECK_MS        350U
 #define CAL_CURRENT_CHECK_MS        700U
