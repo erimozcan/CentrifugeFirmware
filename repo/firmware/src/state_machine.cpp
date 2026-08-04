@@ -229,6 +229,11 @@ void StateMachine::tick(
   motor.setCommandOutputEnabled(ctx.commandOutputEnabled);
   bool indexingState = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_RUN_INDEX ||
                         ctx.state == STATE_RUN_SWEEP_EXTEND);
+  // A detent-reference CAPTURE is only valid where the gantry is known to sit in a detent:
+  // at rest, before/after a cycle. Mid-cycle (post-spin settle, sweep, indexing) the rotor
+  // stops at an arbitrary angle, and learning THAT as "detent 0" would shift every detent
+  // and put the lock into a bucket. Reconciling with the ESC is safe anywhere.
+  bool atDetent = (ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE);
   if (ctx.state == STATE_RUN_SWEEP_TURN) {
     // Knockdown sweep: one slow full revolution with the lock's sweeper at 50%. Uses only
     // SPIN + rev= telemetry, so it is the same on both rotate paths.
@@ -246,10 +251,11 @@ void StateMachine::tick(
     motor.commandIndex(escTube);
   } else {
     motor.finishIndexIfNeeded();               // disarm the ESC angle-hold if we were indexing
-    motor.maintainHome();                      // complete a pending detent-reference capture AND
-                                               // sync the ESC's HOME -- this call was missing on
-                                               // the INDEX path, so HOMED stayed 0 and every tube
-                                               // target was ESC-power-on-relative (2026-07-22)
+    motor.maintainHome(atDetent);              // reconcile with the ESC's reference AND
+                                               // complete a pending capture -- this call was
+                                               // missing on the INDEX path, so HOMED stayed 0
+                                               // and every tube target was ESC-power-on-
+                                               // relative (2026-07-22)
     motor.sendVelocitySetpoint(ctx.rpmCmd);
   }
 #else
@@ -258,7 +264,7 @@ void StateMachine::tick(
     motor.updateVelocityRotate();
   } else {
     motor.endVelocityRotate();                 // stop + reset if a rotate was active
-    motor.maintainHome();                      // complete a pending detent-reference capture
+    motor.maintainHome(atDetent);              // reconcile + complete a pending capture
     motor.sendVelocitySetpoint(ctx.rpmCmd);
   }
 #endif
@@ -266,6 +272,10 @@ void StateMachine::tick(
 
   motor.drainRx();
   ctx.homed = motor.homeSet();
+  // Crush-guard diagnostics, surfaced in STATUS so a DETENT_MISMATCH fault can be read
+  // from the console (deg x10 to the nearest detent; -1 = no reference / stale angle).
+  ctx.detentErrDeg10 = motor.detentErrorDeg10();
+  ctx.detentOk = motor.detentVerified();
 
   guard.updateMotorEnable(ctx.state);
   ctx.motorEnableOutput = guard.motorEnableOutput();
@@ -302,7 +312,7 @@ void StateMachine::tick(
   // wins -- the sweep crawls at SWEEP_TURN_RPM, well under SAFE_UNLOCK_RPM.
   ctx.lockSweepHold = (ctx.state == STATE_RUN_SWEEP_EXTEND ||
                        ctx.state == STATE_RUN_SWEEP_TURN) &&
-                      (ctx.rpm1 < SAFE_UNLOCK_RPM);
+                      (ctx.rpm1 < SWEEP_ABORT_RPM);
 
   guard.updateLockActuator(ctx.lockActuatorCommanded, ctx.lockSweepHold);
   guard.updateDoorMotor(ctx.doorMotorCommand, ctx.doorPwmDuty);

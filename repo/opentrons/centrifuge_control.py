@@ -143,6 +143,21 @@ def rpm_to_rcf(rpm):
     return RCF_PER_RPM2 * rpm * rpm
 
 
+def describe_detent(status):
+    """Human form of the crush guard's view: is the pin over a real detent?
+
+    DETENT_D10 is tenths of a degree to the nearest learned detent, -1 when there is no
+    home reference or the ESC's angle is stale. This is what a "detent mismatch" fault
+    is complaining about, so it is worth reading before opening the panels.
+    """
+    err = status.get("DETENT_D10")
+    if err is None:
+        return "detent ?"                     # firmware predates the diagnostic
+    if err < 0:
+        return "detent UNKNOWN (no home reference or stale ESC angle)"
+    return "detent %s (%.1f deg off)" % ("ok" if status.get("DETENT_OK") else "OFF", err / 10.0)
+
+
 def _candidate_ports():
     """Serial devices that could plausibly be the centrifuge, best guess first.
 
@@ -294,13 +309,14 @@ class Centrifuge(object):
     def describe(self):
         """One-line human summary, the same facts the console header shows."""
         s = self.status()
-        return "%-18s door %-7s tube %s  lock %s  %5d rpm (%d x g)%s" % (
+        return "%-18s door %-7s tube %s  lock %s  %5d rpm (%d x g)  %s%s" % (
             STATE_NAMES.get(s.get("STATE"), "state %s" % s.get("STATE")),
             DOOR_NAMES.get(s.get("DOOR"), "?"),
             s.get("TUBE") or "?",
             "in" if s.get("LOCKCMD") else "out",
             s.get("RPM1", 0),
             round(rpm_to_rcf(s.get("RPM1", 0))),
+            describe_detent(s),
             "" if not s.get("FAULT") else "  FAULT: %s" % FAULT_NAMES.get(s["FAULT"], s["FAULT"]),
         )
 

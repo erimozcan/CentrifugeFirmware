@@ -101,7 +101,7 @@ def test_index_path_still_maintains_home_capture():
     # (bench 2026-07-22: every index landed wherever the ESC happened to boot).
     start = src.index("#ifdef ROTATE_VIA_INDEX")
     idx_branch = src[start:src.index("#else", start)]
-    assert "maintainHome()" in idx_branch
+    assert "maintainHome(atDetent)" in idx_branch
 
 
 def test_master_resends_index_until_arrival():

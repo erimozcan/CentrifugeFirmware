@@ -230,6 +230,12 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
   idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.currentTube));
   idx = appendLiteral(line, sizeof(line), idx, " HOMED=");
   idx = appendInt32(line, sizeof(line), idx, ctx.homed ? 1 : 0);
+  // Crush guard: DETENT_OK=1 means the lock may extend; DETENT_D10 is the distance to the
+  // nearest learned detent in tenths of a degree (-1 = no reference or stale ESC angle).
+  idx = appendLiteral(line, sizeof(line), idx, " DETENT_OK=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.detentOk ? 1 : 0);
+  idx = appendLiteral(line, sizeof(line), idx, " DETENT_D10=");
+  idx = appendInt32(line, sizeof(line), idx, ctx.detentErrDeg10);
   idx = appendLiteral(line, sizeof(line), idx, " ROTTGT=");
   {
     bool rotating = (ctx.state == STATE_ROTATE_RELEASE || ctx.state == STATE_ROTATE_MOVING ||

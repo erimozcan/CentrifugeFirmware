@@ -25,10 +25,15 @@ class MotorInterface {
   // Crawls forward to an ABSOLUTE detent (works from any position, e.g. a random post-spin
   // stop). Detents are learned relative to a homed reference.
   void requestHome();                     // capture the current shaft angle as detent 0 (tube 1)
-  void maintainHome();                    // call when idle: completes a pending home capture
+  // Call every tick while NOT indexing. Keeps our detent model slaved to the ESC's (the
+  // ESC is what physically positions the gantry, so its reference is the authority) and
+  // completes a pending capture. atDetent says whether the gantry is known to be sitting
+  // in a detent right now -- a capture taken anywhere else would poison every detent.
+  void maintainHome(bool atDetent);
   bool homeSet() const;
   bool detentVerified() const;            // crush guard: FRESH ESC angle sits on a learned
                                           // detent -- required before any full lock throw
+  int32_t detentErrorDeg10() const;       // distance to the nearest detent, deg x10 (-1 unknown)
   void startRotateToTube(uint8_t tube);   // crawl to tube 1..TUBE_COUNT (absolute detent)
   void startRotateToNearestDetent();      // crawl to the nearest detent (post-spin re-lock)
 

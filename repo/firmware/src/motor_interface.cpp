@@ -189,9 +189,45 @@ void MotorInterface::requestHome() {
   rotPollMs_ = 0U;
 }
 
-void MotorInterface::maintainHome() {
+void MotorInterface::maintainHome(bool atDetent) {
+  // ---- reconcile with the ESC before anything else --------------------------------
+  // INDEX moves to the ESC's OWN reference, so if our model of the detents disagrees
+  // with the ESC's, the gantry lands where we don't expect and the crush guard faults.
+  // The ESC is therefore the authority whenever it has a reference.
+  // Only from rest: mid-cycle the rotor sits at an arbitrary angle and every branch here
+  // would learn or confirm the wrong thing. An ESC that loses its reference mid-run just
+  // faults the run, which is the safe outcome.
+  if (atDetent && homeSet_ && escHomeSeen_ && !homePending_) {
+    if (!escHomeSet_) {
+      // The ESC rebooted or was reflashed and fell back to raw encoder zero -- which is
+      // NOT a detent -- while we kept ours. Exactly what a Nano-then-ESC flash order
+      // produces, and it sends INDEX to a bucket.
+      if (detentVerified()) {
+        // Our own reference still checks out against the current angle, so the gantry is
+        // demonstrably parked in a detent: re-teach the ESC that same grid. (Which detent
+        // becomes "tube 1" may rotate -- cosmetic; any detent is lockable. Re-run HOME
+        // from the console with tube 1 presented to relabel them.)
+        txLiteral("HOME");
+        detentRef_ = measuredFrac_;
+      } else {
+        // We cannot prove where a detent is. Drop our reference too: the lock then
+        // refuses to extend and an index arrival faults honestly, instead of the pin
+        // being driven into a tube.
+        homeSet_ = false;
+        homePending_ = true;
+        homeForce_ = true;
+        homeWaitStartMs_ = 0U;
+      }
+    } else if (circDist(escHomeRefFrac_, detentRef_) > DETENT_VERIFY_TOL_REV) {
+      detentRef_ = escHomeRefFrac_;   // drifted apart -> trust the end that does the moving
+    }
+  }
+
   if (!homePending_) {
     return;
+  }
+  if (!atDetent) {
+    return;   // capturing mid-cycle would learn a random angle as "detent 0"
   }
   uint32_t now = millis();
   if (homeWaitStartMs_ == 0U) {
@@ -240,11 +276,20 @@ bool MotorInterface::homeSet() const { return homeSet_; }
 // DETENT_VERIFY_TOL_REV of a learned detent. Half a tube slot is 0.125 rev, so a
 // bucket position can never pass. The full lock throw is gated on this.
 bool MotorInterface::detentVerified() const {
+  int32_t err = detentErrorDeg10();
+  return err >= 0 && err <= static_cast<int32_t>(DETENT_VERIFY_TOL_REV * 3600.0f);
+}
+
+// Distance from the current shaft angle to the NEAREST learned detent, in tenths of a
+// degree. -1 means "unknown" -- no home reference, or the ESC angle is stale (a quiet or
+// rebooting ESC proves nothing). Surfaced in STATUS so a crush-guard fault is diagnosable
+// from the console instead of needing the panels off.
+int32_t MotorInterface::detentErrorDeg10() const {
   if (!homeSet_ || !rotSeen_) {
-    return false;
+    return -1;
   }
   if ((uint32_t)(millis() - posSeenMs_) > DETENT_POS_FRESH_MS) {
-    return false;   // stale angle (ESC quiet/rebooting) proves nothing
+    return -1;
   }
   float best = 1.0f;
   for (uint8_t k = 0U; k < TUBE_COUNT; k++) {
@@ -254,7 +299,7 @@ bool MotorInterface::detentVerified() const {
       best = d;
     }
   }
-  return best <= DETENT_VERIFY_TOL_REV;
+  return static_cast<int32_t>(best * 3600.0f);   // rev -> deg x10
 }
 
 uint8_t MotorInterface::arrivedTube() const {
@@ -318,7 +363,11 @@ void MotorInterface::updateSweepTurn() {
         sweepPhase_ = SWEEP_TURNING;
         break;
       case SWEEP_TURNING:
-        if (measuredRev_ - sweepStartRev_ >= SWEEP_REV_TARGET) {
+        // fabsf: the ESC's cumulative rev= may count either way depending on which
+        // direction SPIN drives the shaft. Nothing else in the firmware depends on that
+        // sign, so the sweep must not either -- getting it backwards would simply never
+        // reach the target and time the run out.
+        if (fabsf(measuredRev_ - sweepStartRev_) >= SWEEP_REV_TARGET) {
           rotLastRev_ = measuredRev_;
           rotStableMs_ = now;
           sweepPhase_ = SWEEP_SETTLING;   // cut drive; wait until truly at rest

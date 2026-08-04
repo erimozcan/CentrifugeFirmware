@@ -185,6 +185,8 @@ struct SystemContext {
   uint32_t rotateDeadlineMs;
   bool sweepDone;          // knockdown turn finished -> next RUN_INDEX locks + opens
   bool lockSweepHold;      // lock is holding the partial 50% sweep extend right now
+  bool detentOk;           // crush guard: the pin is over a verified detent right now
+  int32_t detentErrDeg10;  // deg x10 to the nearest detent (-1 = no reference / stale)
   bool homed;              // detent reference captured (mirror of MotorInterface::homeSet())
   uint16_t ntcAdc;
   bool fanEnabled;

@@ -249,6 +249,12 @@
                                  // SAFE_UNLOCK_RPM so the rpm net never drops the hold)
 #define SWEEP_REV_TARGET  0.96f  // stop ~15 deg short of the full rev; the re-index
                                  // covers the remainder and lands the detent
+// The sweeper is SUPPOSED to touch buckets at SWEEP_TURN_RPM, so the plain lock safety
+// net (SAFE_UNLOCK_RPM = 50) is the wrong bar for it: measured RPM jitters around the
+// 30 RPM crawl and a momentary reading over 50 would retract the sweeper mid-turn --
+// silently skipping buckets with no fault to show for it. This backstop still retracts
+// if the rotor ever really runs away, but sits well clear of the crawl.
+#define SWEEP_ABORT_RPM   150
 
 // Gantry tube indexing (ROTATE). Reuses RUN_RELEASE_MS/RUN_ENGAGE_MS for the lock dwells.
 #define TUBE_COUNT              4U      // 4 tube positions, 90 deg apart (matches the ESC)
