@@ -136,7 +136,8 @@ void StateMachine::begin(SystemContext &ctx, uint32_t nowMs) {
   ctx.holdDeadlineMs = nowMs;
 
   ctx.commandOutputEnabled = true;
-  ctx.lockActuatorCommanded = true;   // gantry starts LOCKED (indexing lock, rest position)
+  ctx.lockActuatorCommanded = false;  // boot retracted; the tick's crush guard engages the
+                                      // lock once ESC telemetry verifies a detent under it
   ctx.lockConfirmed = false;
   ctx.lockAwaitingSensor = false;
   ctx.lockCommandStartMs = nowMs;
@@ -285,6 +286,14 @@ void StateMachine::tick(
   // Safety net: never drive the lock into a still-turning rotor (e.g. coasting after an
   // E-STOP that jumped to a "locked" fault state) -- hold it released until near zero.
   if (ctx.rpm1 >= SAFE_UNLOCK_RPM) {
+    ctx.lockActuatorCommanded = false;
+  }
+
+  // Crush guard: the full throw goes into a BUCKET, not a detent, if anything upstream
+  // lied about position (a mid-cycle 5 V brownout reboot, a bad home, a false arrival).
+  // Only extend fully when the ESC-reported angle is verified to sit on a learned detent.
+  // The manual bench override (no ESC -> no telemetry) still forces it deliberately.
+  if (ctx.lockActuatorCommanded && !ctx.lockManualOverride && !motor.detentVerified()) {
     ctx.lockActuatorCommanded = false;
   }
 
@@ -579,7 +588,10 @@ void StateMachine::applyStateProgression(SystemContext &ctx, MotorInterface &mot
       if (motor.velocityRotateArrived()) {
 #endif
         ctx.currentTube = motor.arrivedTube();
-        if (ctx.sweepDone) {
+        if (!motor.detentVerified()) {
+          // "Arrived" somewhere that is not a detent: engaging would crush a bucket.
+          enterHardStop(ctx, FAULT_DETENT_MISMATCH, nowMs);
+        } else if (ctx.sweepDone) {
           transitionTo(ctx, STATE_RUN_ENGAGE, nowMs);
         } else {
           // The detent hold carries through SWEEP_EXTEND; nothing to start yet.
@@ -647,6 +659,10 @@ void StateMachine::applyStateProgression(SystemContext &ctx, MotorInterface &mot
 #else
       if (motor.velocityRotateArrived()) {
 #endif
+        if (!motor.detentVerified()) {
+          enterHardStop(ctx, FAULT_DETENT_MISMATCH, nowMs);   // see RUN_INDEX
+          break;
+        }
         ctx.currentTube = ctx.rotateTube;
         transitionTo(ctx, STATE_ROTATE_ENGAGE, nowMs);
       } else if (timeReached(nowMs, ctx.rotateDeadlineMs)) {

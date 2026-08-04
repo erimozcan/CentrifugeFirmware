@@ -53,7 +53,10 @@ enum FaultCode : uint8_t {
   FAULT_DOOR_MOVE_TIMEOUT = 7,
   FAULT_OVER_TEMP = 8,
   FAULT_INTERLOCK_NOT_SAFE = 9,
-  FAULT_ROTATE_TIMEOUT = 10
+  FAULT_ROTATE_TIMEOUT = 10,
+  // An index "arrival" whose ESC-reported shaft angle is NOT on a learned detent --
+  // locking there would drive the pin into a bucket. Latched instead of engaging.
+  FAULT_DETENT_MISMATCH = 11
 };
 
 enum DoorState : uint8_t {

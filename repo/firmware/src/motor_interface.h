@@ -27,6 +27,8 @@ class MotorInterface {
   void requestHome();                     // capture the current shaft angle as detent 0 (tube 1)
   void maintainHome();                    // call when idle: completes a pending home capture
   bool homeSet() const;
+  bool detentVerified() const;            // crush guard: FRESH ESC angle sits on a learned
+                                          // detent -- required before any full lock throw
   void startRotateToTube(uint8_t tube);   // crawl to tube 1..TUBE_COUNT (absolute detent)
   void startRotateToNearestDetent();      // crawl to the nearest detent (post-spin re-lock)
 
@@ -98,6 +100,13 @@ class MotorInterface {
   float detentRef_ = 0.0f;
   bool homeSet_ = false;
   bool homePending_ = false;
+  bool homeForce_ = false;       // explicit HOME request (UI): capture, never adopt
+  uint32_t homeWaitStartMs_ = 0U; // boot: how long we've waited for ESC home telemetry
+  uint32_t posSeenMs_ = 0U;      // last time an absolute angle (pos=/ang=) arrived
+  // ESC-reported home reference (survives a master brownout reboot; see maintainHome).
+  bool escHomeSeen_ = false;     // a home= field has arrived in telemetry
+  bool escHomeSet_ = false;      // ESC says its reference was explicitly homed this boot
+  float escHomeRefFrac_ = 0.0f;  // ESC's reference as a fraction of a rev
 
   // Bucket-sweep turn state (progress measured on the ESC's cumulative rev= telemetry).
   enum SweepPhase { SWEEP_INACTIVE = 0, SWEEP_ACQUIRE, SWEEP_TURNING, SWEEP_SETTLING, SWEEP_DONE };
@@ -110,6 +119,7 @@ class MotorInterface {
   void txLiteral(const char *verb);
   void applyRotateTuning();   // boost velocity P for low-speed torque during a crawl
   void parseEscLine(const char *line);
+  void parseEscHome(const char *line);   // home=/href= fields (both ST and STAT carry them)
 
   static size_t writeInt32(char *out, size_t maxLen, int32_t value);
 };

@@ -38,7 +38,13 @@ void MotorInterface::begin() {
   rotPhase_ = ROT_INACTIVE;
   sweepPhase_ = SWEEP_INACTIVE;
   homeSet_ = false;
-  homePending_ = true;   // auto-capture the detent reference from the startup (homed) position
+  homePending_ = true;   // adopt the ESC's surviving reference, else capture at the
+                         // startup position (see maintainHome)
+  homeForce_ = false;
+  homeWaitStartMs_ = 0U;
+  posSeenMs_ = 0U;
+  escHomeSeen_ = false;
+  escHomeSet_ = false;
 }
 
 void MotorInterface::setCommandOutputEnabled(bool enabled) {
@@ -177,6 +183,8 @@ void copyToken(char *out, size_t outLen, const char *value) {
 void MotorInterface::requestHome() {
   homeSet_ = false;
   homePending_ = true;
+  homeForce_ = true;     // explicit request (UI "Set home"): always capture, never adopt
+  homeWaitStartMs_ = 0U;
   rotSeen_ = false;
   rotPollMs_ = 0U;
 }
@@ -185,16 +193,41 @@ void MotorInterface::maintainHome() {
   if (!homePending_) {
     return;
   }
-  if (rotSeen_) {                 // a fresh angle arrived -> that position is detent 0 (tube 1)
+  uint32_t now = millis();
+  if (homeWaitStartMs_ == 0U) {
+    homeWaitStartMs_ = now;
+  }
+
+  // ADOPT the ESC's surviving reference when it has one: the ESC rides the 24 V bus, so
+  // its explicitly-homed detent reference outlives a master 5 V brownout reboot. Blindly
+  // re-capturing home at whatever mid-cycle angle the gantry was left SHIFTS every detent
+  // (seen 2026-08-04: a post-sweep reboot re-homed at a half-detent -> the lock went into
+  // a bucket). Only an explicit HOME request (UI) forces a fresh capture.
+  if (!homeForce_ && escHomeSeen_ && escHomeSet_) {
+    detentRef_ = escHomeRefFrac_;
+    homeSet_ = true;
+    homePending_ = false;
+    homeWaitStartMs_ = 0U;
+    return;
+  }
+
+  // Capture at the current angle when: explicitly requested, the ESC says it was never
+  // homed this boot (fresh full power-up), or an older ESC flash reports no home
+  // telemetry at all (fall back after HOME_ADOPT_WAIT_MS so bring-up rigs still home).
+  bool escSaysUnhomed = escHomeSeen_ && !escHomeSet_;
+  bool waitedOut = (uint32_t)(now - homeWaitStartMs_) >= HOME_ADOPT_WAIT_MS;
+  if (rotSeen_ && (homeForce_ || escSaysUnhomed || waitedOut)) {
     detentRef_ = measuredFrac_;
     homeSet_ = true;
     homePending_ = false;
+    homeForce_ = false;
+    homeWaitStartMs_ = 0U;
 #ifdef ROTATE_VIA_INDEX
     txLiteral("HOME");            // sync the ESC's own detent reference to this position
 #endif
     return;
   }
-  uint32_t now = millis();
+
   if ((uint32_t)(now - rotPollMs_) >= ROTATE_POLL_MS) {
     txLiteral("?");
     rotPollMs_ = now;
@@ -202,6 +235,27 @@ void MotorInterface::maintainHome() {
 }
 
 bool MotorInterface::homeSet() const { return homeSet_; }
+
+// Crush guard: true only when a FRESH ESC-reported shaft angle sits within
+// DETENT_VERIFY_TOL_REV of a learned detent. Half a tube slot is 0.125 rev, so a
+// bucket position can never pass. The full lock throw is gated on this.
+bool MotorInterface::detentVerified() const {
+  if (!homeSet_ || !rotSeen_) {
+    return false;
+  }
+  if ((uint32_t)(millis() - posSeenMs_) > DETENT_POS_FRESH_MS) {
+    return false;   // stale angle (ESC quiet/rebooting) proves nothing
+  }
+  float best = 1.0f;
+  for (uint8_t k = 0U; k < TUBE_COUNT; k++) {
+    float det = mod1(detentRef_ + static_cast<float>(k) / static_cast<float>(TUBE_COUNT));
+    float d = circDist(measuredFrac_, det);
+    if (d < best) {
+      best = d;
+    }
+  }
+  return best <= DETENT_VERIFY_TOL_REV;
+}
 
 uint8_t MotorInterface::arrivedTube() const {
   if (!homeSet_) {
@@ -453,6 +507,7 @@ void MotorInterface::parseEscLine(const char *line) {
     if (a != nullptr) {
       measuredFrac_ = static_cast<float>(atof(a + 4)) * (1.0f / 6.2831853f);
       rotSeen_ = true;
+      posSeenMs_ = millis();
     }
     const char *r = strstr(line, "rev=");   // cumulative revs (motion/settle + sweep progress)
     if (r != nullptr) {
@@ -460,6 +515,7 @@ void MotorInterface::parseEscLine(const char *line) {
       sweepRevSeen_ = true;   // ST pos= also sets rotSeen_, so the sweep needs its own
                               // "rev is fresh" flag or it could seed from a stale value
     }
+    parseEscHome(line);
     return;
   }
 
@@ -513,11 +569,26 @@ void MotorInterface::parseEscLine(const char *line) {
   if (pos != nullptr) {
     measuredFrac_ = static_cast<float>(atof(pos)) * (1.0f / 360.0f);
     rotSeen_ = true;
+    posSeenMs_ = millis();
   }
+  parseEscHome(line);
 
   // Index arrival: the ESC reports state=indexed once it has reached + is holding the tube.
   if (indexActive_) {
     indexArrived_ = (strstr(line, "state=indexed") != nullptr);
+  }
+}
+
+// home=/href= appear in both the ST stream and STAT replies (see the ESC's printers).
+void MotorInterface::parseEscHome(const char *line) {
+  const char *h = strstr(line, "home=");
+  if (h != nullptr) {
+    escHomeSet_ = (atol(h + 5) != 0);
+    escHomeSeen_ = true;
+  }
+  const char *hr = strstr(line, "href=");
+  if (hr != nullptr) {
+    escHomeRefFrac_ = mod1(static_cast<float>(atof(hr + 5)) * (1.0f / 6.2831853f));
   }
 }
 

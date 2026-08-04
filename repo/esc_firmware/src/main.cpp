@@ -469,6 +469,14 @@ static void disarm(const char *why) {
   Serial.print("DISARMED ("); Serial.print(why); Serial.println(")");
 }
 
+// Detent reference for tube indexing: the mechanical angle of tube 0's detent. Defaults
+// to the power-on shaft angle; re-captured by the HOME verb (see linkHome below).
+static float home_ref_rad = 0.0f;
+// True once the master has EXPLICITLY homed this boot. Reported in telemetry (home=)
+// so a master that brownout-reboots mid-cycle can ADOPT the surviving reference (href=)
+// instead of blindly re-capturing home at whatever angle the gantry was left.
+static bool  home_explicit = false;
+
 static void printStat() {
   // Displayed velocity is averaged over the telemetry interval. The Sensor's own
   // getVelocity() is quantization-noisy because loopFOC() updates it at kHz rates
@@ -488,6 +496,8 @@ static void printStat() {
   Serial.print(" armed=");     Serial.print(armed ? 1 : 0);
   Serial.print(" rev=");       Serial.print(now_rev, 3);
   Serial.print(" ang=");       Serial.print(encoder.getMechanicalAngle(), 3); // [0,2pi)
+  Serial.print(" home=");      Serial.print(home_explicit ? 1 : 0);
+  Serial.print(" href=");      Serial.print(home_ref_rad, 4);
   Serial.print(" cnt=");       Serial.print((uint32_t)(TIM4->CNT));          // raw TIM4 counter
   Serial.print(" hz=");        Serial.print(g_loop_hz);                       // FOC loop rate
   Serial.print(" vel=");       Serial.print(tele_vel, 3);                     // rev/s, interval-averaged
@@ -657,6 +667,8 @@ static void printST() {
   Serial.print("ST rpm=");   Serial.print(rpm, 0);
   Serial.print(" tgt=");     Serial.print(tgt_rpm, 0);
   Serial.print(" state=");   Serial.print(st);
+  Serial.print(" home=");    Serial.print(home_explicit ? 1 : 0);
+  Serial.print(" href=");    Serial.print(home_ref_rad, 4);
   Serial.print(" hz=");      Serial.print(g_loop_hz);
   Serial.print(" cur=");     Serial.print(cur, 2);
   Serial.print(" cal=");     Serial.print(calStateName());
@@ -711,16 +723,12 @@ static void linkStop() {
   Serial.println("OK STOP");
 }
 
-// Detent reference for tube indexing: the mechanical angle of tube 0's detent. Defaults
-// to the power-on shaft angle (the operator boots with the gantry homed at a detent);
-// re-captured any time the master sends HOME with the gantry parked at a detent.
-static float home_ref_rad = 0.0f;
-
 // HOME: capture the CURRENT shaft angle as tube 0's detent reference. Sent by the master
 // at boot and from the UI's "Set home" (gantry parked at a detent, rotor stopped).
 static void linkHome() {
   link_mode = true; last_link_ms = millis(); wd_tripped = false;
   home_ref_rad = _normalizeAngle(encoder.getAngle());
+  home_explicit = true;
   Serial.print("OK HOME "); Serial.println(home_ref_rad, 4);
 }
 

@@ -15,7 +15,10 @@ void HardwareGuard::begin() {
   // GPIO (no Arduino remap), so hand it the true GPIO or the pulse comes out on GPIO10
   // instead of the D10 pad (GPIO21). Same class of bug as the WS2812 strip on D11.
   lockServo_.attach(digitalPinToGPIONumber(PIN_LOCK_ACTUATOR), LOCK_PULSE_MIN_US, LOCK_PULSE_MAX_US);
-  lockServo_.writeMicroseconds(LOCK_PULSE_LOCKED_US);   // gantry starts LOCKED (rest position)
+  // Boot RETRACTED: after a mid-cycle brownout reboot the gantry can be anywhere -- a
+  // blind boot-extend once drove the pin into a bucket. The state machine re-engages
+  // within ~1 s, as soon as the ESC's angle telemetry verifies a detent under the pin.
+  lockServo_.writeMicroseconds(LOCK_PULSE_UNLOCKED_US);
 #else
   pinMode(PIN_LOCK_ACTUATOR, OUTPUT);
 #endif
@@ -26,7 +29,7 @@ void HardwareGuard::begin() {
   pinMode(PIN_DOOR_CLOSED_HALL, INPUT_PULLUP);
 
   motorEnable_ = false;
-  lockActuator_ = true;   // gantry starts LOCKED
+  lockActuator_ = false;  // boot retracted; engaged only once the detent is verified
   fanEnabled_ = false;
   doorMotorCommand_ = DOOR_MOTOR_STOP;
   doorKicking_ = false;

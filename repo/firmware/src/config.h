@@ -35,6 +35,22 @@
 #endif
 #define SAFE_UNLOCK_RPM 50
 
+// Lock crush guard (2026-08-04): the FULL lock throw is only ever commanded when the
+// ESC-reported shaft angle sits within DETENT_VERIFY_TOL_REV of a learned detent, on
+// telemetry no older than DETENT_POS_FRESH_MS. Half a tube slot is 0.125 rev, so ~20 deg
+// (the lock taper's capture range) can never pass at a bucket. Motivation: a mid-cycle
+// 5 V brownout reboot (lock-actuator stall; see the audio notes below) used to re-extend
+// the lock at boot wherever the gantry stopped -- once, onto a bucket. The manual LOCK
+// override (bench rig, no ESC telemetry) bypasses the guard.
+#define DETENT_VERIFY_TOL_REV  0.055f
+#define DETENT_POS_FRESH_MS    1500U
+// Master boot: wait this long for the ESC to report an explicitly-set home reference
+// (the ESC rides the 24 V bus, so its reference SURVIVES a master brownout reboot and
+// must be adopted, not blindly re-captured at whatever mid-cycle angle the gantry was
+// left). Fall back to capturing at the current angle on a fresh full power-up or an
+// older ESC flash that doesn't report home telemetry.
+#define HOME_ADOPT_WAIT_MS     3000U
+
 // ===========================================================================
 // Pin map. Two targets share this firmware:
 //   * Arduino Nano ESP32 (ESP32-S3) -- the FINAL master controller.

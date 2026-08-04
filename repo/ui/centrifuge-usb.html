@@ -460,7 +460,7 @@ const STATE_NAMES = ['BOOT','SAFE IDLE','PRE-RUN','LIFT RAMP','SEAT HOLD','MAIN 
   'UNLOCKING','ROTATING','LOCKING','INDEXING',                // 15-18 rotate / post-spin index
   'SWEEP SET','SWEEPING'];                                    // 19-20 post-run bucket sweep (door closed)
 const FAULT_NAMES = ['none','illegal state','bad command','hard stop','lock timeout','door invalid',
-  'door open in spin','door timeout','over temp','interlock unsafe','rotate timeout'];
+  'door open in spin','door timeout','over temp','interlock unsafe','rotate timeout','detent mismatch'];
 const SPIN_STATES = new Set([2,3,4,5,6,7]);      // rotor energised
 const ROTATE_STATES = new Set([15,16,17,18]);    // gantry indexing (door open)
 const STOPPED = st => st===0 || st===1;          // BOOT / SAFE IDLE
