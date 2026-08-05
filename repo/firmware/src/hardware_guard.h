@@ -13,7 +13,9 @@ class HardwareGuard {
  public:
   void begin();
   void updateMotorEnable(SystemState state);
-  void updateLockActuator(bool engaged, bool sweepHold);
+  // engaged drives the digital (Due) build; pulseUs is the resolved servo target the
+  // state machine already worked out (locked / sweep hold / retracted / manual debug).
+  void updateLockActuator(bool engaged, uint16_t pulseUs);
   void updateFan(bool enabled);
   void updateDoorMotor(DoorMotorCommand command, uint8_t runDuty);
 

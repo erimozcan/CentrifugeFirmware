@@ -72,6 +72,27 @@ enum DoorMotorCommand : int8_t {
   DOOR_MOTOR_CLOSE = 1
 };
 
+// Lock travel (0 = fully retracted, 100 = fully extended) -> servo pulse. Travel is
+// linear in pulse width per the PQ12-R datasheet, and the two endpoints are the
+// calibrated ones, so every partial position is defined in terms of them.
+inline uint16_t lockPulseForPercent(uint8_t pct) {
+  if (pct > 100U) {
+    pct = 100U;
+  }
+  int32_t span = static_cast<int32_t>(LOCK_PULSE_UNLOCKED_US) -
+                 static_cast<int32_t>(LOCK_PULSE_LOCKED_US);
+  return static_cast<uint16_t>(LOCK_PULSE_UNLOCKED_US - (span * pct) / 100);
+}
+
+inline uint8_t lockPercentForPulse(uint16_t pulseUs) {
+  int32_t span = static_cast<int32_t>(LOCK_PULSE_UNLOCKED_US) -
+                 static_cast<int32_t>(LOCK_PULSE_LOCKED_US);
+  int32_t pct = ((static_cast<int32_t>(LOCK_PULSE_UNLOCKED_US) - pulseUs) * 100) / span;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  return static_cast<uint8_t>(pct);
+}
+
 enum LedMode : uint8_t {
   LED_MODE_SOLID = 0,    // show ledR/ledG/ledB (all-zero = off)
   LED_MODE_RAINBOW = 1   // animated hue sweep
@@ -97,6 +118,8 @@ struct PendingCommand {
   bool hasInit;
   bool hasLock;
   bool hasUnlock;
+  bool hasLockPct;        // debug: drive the lock to an explicit travel (0-100 %)
+  uint8_t lockPct;
   bool hasDoorOpen;
   bool hasDoorClose;
   bool hasDoorStop;
@@ -170,6 +193,8 @@ struct SystemContext {
   uint32_t lockCommandStartMs;
   bool lockManualOverride;   // debug: manual LOCK/UNLOCK overrides the auto policy (idle only)
   bool lockManualEngaged;
+  int16_t lockManualPct;     // debug: -1 = use lockManualEngaged, else explicit 0-100 % travel
+  uint8_t lockPctOut;        // the travel actually being driven right now (0-100 %)
   DoorState doorState;
   bool doorOpenSensorActive;
   bool doorClosedSensorActive;

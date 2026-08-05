@@ -30,6 +30,7 @@ HELP = """
   abort                    ramp a running spin down
   estop                    immediate torque cut (latches a fault)
   lock / unlock            DEBUG: force the gantry lock in / out
+  lockpct <0-100>          DEBUG: drive the lock to an explicit travel %
   home                     set the current angle as tube 1's detent
   power on / power off     device power (fan + lights)
   clear                    clear a latched fault
@@ -84,6 +85,8 @@ def dispatch(cf, line):
         cf.lock()
     elif verb == "unlock":
         cf.unlock()
+    elif verb == "lockpct":
+        cf.lock_percent(args[0])
     elif verb == "home":
         cf.home()
     elif verb == "power":

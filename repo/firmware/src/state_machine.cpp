@@ -140,6 +140,7 @@ void StateMachine::begin(SystemContext &ctx, uint32_t nowMs) {
                                       // lock once ESC telemetry verifies a detent under it
   ctx.lockConfirmed = false;
   ctx.lockAwaitingSensor = false;
+  ctx.lockManualPct = -1;   // memset leaves 0, which would read as "hold at 0% travel"
   ctx.lockCommandStartMs = nowMs;
   ctx.doorState = DOOR_STATE_UNKNOWN;
   ctx.doorOpenSensorActive = false;
@@ -307,14 +308,32 @@ void StateMachine::tick(
     ctx.lockActuatorCommanded = false;
   }
 
-  // Bucket-sweep hold: a partial extend (LOCK_PULSE_SWEEP_US) puts the sweeper into
-  // held through the extend dwell AND the slow knockdown turn. The rpm safety net still
-  // wins -- the sweep crawls at SWEEP_TURN_RPM, well under SAFE_UNLOCK_RPM.
+  // Bucket-sweep hold: a partial extend (LOCK_PULSE_SWEEP_US) puts the sweeper into the
+  // buckets' path, held through the extend dwell AND the slow knockdown turn. Its own
+  // backstop, not SAFE_UNLOCK_RPM -- the sweeper is MEANT to touch buckets at the crawl.
   ctx.lockSweepHold = (ctx.state == STATE_RUN_SWEEP_EXTEND ||
                        ctx.state == STATE_RUN_SWEEP_TURN) &&
                       (ctx.rpm1 < SWEEP_ABORT_RPM);
 
-  guard.updateLockActuator(ctx.lockActuatorCommanded, ctx.lockSweepHold);
+  // Resolve the one servo target. Debug LOCK_PCT wins where it is legal at all (idle,
+  // rotor stopped); otherwise the automatic policy decides. Never a partial position
+  // while the rotor turns fast -- that is what the rpm net is for.
+  uint16_t lockPulseUs;
+  bool manualPct = ctx.lockManualOverride && ctx.lockManualPct >= 0 &&
+                   ctx.rpm1 < SAFE_UNLOCK_RPM &&
+                   (ctx.state == STATE_SAFE_IDLE || ctx.state == STATE_BOOT);
+  if (manualPct) {
+    lockPulseUs = lockPulseForPercent(static_cast<uint8_t>(ctx.lockManualPct));
+  } else if (ctx.lockActuatorCommanded) {
+    lockPulseUs = LOCK_PULSE_LOCKED_US;
+  } else if (ctx.lockSweepHold) {
+    lockPulseUs = LOCK_PULSE_SWEEP_US;
+  } else {
+    lockPulseUs = LOCK_PULSE_UNLOCKED_US;
+  }
+  ctx.lockPctOut = lockPercentForPulse(lockPulseUs);
+
+  guard.updateLockActuator(ctx.lockActuatorCommanded, lockPulseUs);
   guard.updateDoorMotor(ctx.doorMotorCommand, ctx.doorPwmDuty);
   guard.updateFan(ctx.fanEnabled);
 }
@@ -444,10 +463,17 @@ void StateMachine::applyPendingCommand(SystemContext &ctx, const PendingCommand 
   if (pendingLocal.hasLock) {
     ctx.lockManualOverride = true;
     ctx.lockManualEngaged = true;
+    ctx.lockManualPct = -1;
   }
   if (pendingLocal.hasUnlock) {
     ctx.lockManualOverride = true;
     ctx.lockManualEngaged = false;
+    ctx.lockManualPct = -1;
+  }
+  if (pendingLocal.hasLockPct) {
+    ctx.lockManualOverride = true;
+    ctx.lockManualPct = static_cast<int16_t>(pendingLocal.lockPct);
+    ctx.lockManualEngaged = (pendingLocal.lockPct >= 100U);
   }
 
   // Door moves key off the RAW hall sensors (doorOpenSensorActive/doorClosedSensorActive),

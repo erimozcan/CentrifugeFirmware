@@ -44,10 +44,44 @@ def test_blocking_alignment_refeeds_the_comms_watchdog():
 
 
 def test_sweep_hold_is_a_partial_extend_between_locked_and_released():
+    # The exact percentage is a bench tuning value (50 -> 40 -> 30 so far, via LOCK_PCT),
+    # so pin the INVARIANT rather than the number: a partial extend, strictly between the
+    # two calibrated endpoints, and never so shallow it cannot reach a bucket.
     config = (REPO / "firmware" / "src" / "config.h").read_text(encoding="utf-8")
-    locked = int(re.search(r"#define LOCK_PULSE_LOCKED_US\s+(\d+)", config).group(1))
-    released = int(re.search(r"#define LOCK_PULSE_UNLOCKED_US\s+(\d+)", config).group(1))
-    sweep = int(re.search(r"#define LOCK_PULSE_SWEEP_US\s+(\d+)", config).group(1))
+    esp_block = config[:config.index("// ---- Arduino Due (prototype)")]
+    locked = int(re.search(r"#define LOCK_PULSE_LOCKED_US\s+(\d+)", esp_block).group(1))
+    released = int(re.search(r"#define LOCK_PULSE_UNLOCKED_US\s+(\d+)", esp_block).group(1))
+    sweep = int(re.search(r"#define LOCK_PULSE_SWEEP_US\s+(\d+)", esp_block).group(1))
     assert locked < sweep < released, "the sweep hold must sit between the two endpoints"
-    # Travel is linear in pulse width: extend % = (2000 - pulse) / 10.
-    assert abs((released - sweep) / 10.0 - 40.0) < 0.01, "sweep hold is not the 40% extend"
+    pct = (released - sweep) * 100.0 / (released - locked)
+    assert 10.0 <= pct <= 60.0, "sweep travel %.0f%% is outside anything sensible" % pct
+
+
+def test_lock_travel_can_be_driven_live_for_tuning():
+    # Every sweep-depth change used to cost a full reflash. LOCK_PCT <0-100> drives the
+    # lock to an explicit travel from the console, and STATUS reads it back.
+    cmd = (REPO / "firmware" / "src" / "command_interface.cpp").read_text(encoding="utf-8")
+    assert 'strcmp(cmdToken, "LOCK_PCT")' in cmd
+    # Same stopped-only gate as LOCK/UNLOCK -- it must not be usable while spinning.
+    body = cmd[cmd.index('strcmp(cmdToken, "LOCK_PCT")'):]
+    body = body[:body.index("DOOR_OPEN")]
+    assert "isLockControlState(ctx.state)" in body and "isMachineMotionCommandBlocked" in body
+
+    protocol = (REPO / "firmware" / "src" / "protocol.cpp").read_text(encoding="utf-8")
+    assert "LOCKPCT=" in protocol
+
+    # The percentage <-> pulse maths lives in ONE place, keyed off the two endpoints.
+    context = (REPO / "firmware" / "src" / "context.h").read_text(encoding="utf-8")
+    assert "lockPulseForPercent" in context and "lockPercentForPulse" in context
+
+    client = (REPO / "opentrons" / "centrifuge.py").read_text(encoding="utf-8")
+    assert "def lock_percent" in client
+
+    # Both consoles carry the slider -- they drift apart easily, so check the pair.
+    for ui in ("index.html", "centrifuge-usb.html"):
+        html = (REPO / "ui" / ui).read_text(encoding="utf-8")
+        assert 'id="lockPctSlider"' in html, "%s has no lock travel slider" % ui
+        assert "'LOCK_PCT '+e.target.value" in html, "%s slider sends nothing" % ui
+        # Commanding on release, not on every input event, keeps a drag off the link.
+        assert "$('lockPctSlider').onchange" in html, "%s commands on drag" % ui
+        assert "f.LOCKPCT" in html, "%s never reads the real travel back" % ui

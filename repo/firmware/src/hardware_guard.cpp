@@ -63,19 +63,15 @@ void HardwareGuard::updateMotorEnable(SystemState state) {
   digitalWrite(PIN_MOTOR_ENABLE, enable ? HIGH : LOW);
 }
 
-void HardwareGuard::updateLockActuator(bool engaged, bool sweepHold) {
+void HardwareGuard::updateLockActuator(bool engaged, uint16_t pulseUs) {
   lockActuator_ = engaged;
 #if defined(ARDUINO_ARCH_ESP32) && defined(LOCK_IS_SERVO)
-  // ENGAGED wins (full throw); else the partial bucket-sweep hold; else retracted.
-  // The state machine only raises sweepHold in the RUN_SWEEP states, where the lock
-  // policy is "released", so the hold can never fight the LOCKED position.
-  uint16_t pulseUs = engaged     ? LOCK_PULSE_LOCKED_US
-                     : sweepHold ? LOCK_PULSE_SWEEP_US
-                                 : LOCK_PULSE_UNLOCKED_US;
+  // The state machine owns the policy (locked / sweep hold / retracted / manual debug)
+  // and hands down the resolved target; this just drives it.
   lockServo_.writeMicroseconds(pulseUs);
 #else
-  // Digital (Due prototype) drive has no partial position -- the sweep hold is servo-only.
-  (void)sweepHold;
+  // Digital (Due prototype) drive has no partial position -- partial holds are servo-only.
+  (void)pulseUs;
   digitalWrite(PIN_LOCK_ACTUATOR, engaged ? HIGH : LOW);
 #endif
 }

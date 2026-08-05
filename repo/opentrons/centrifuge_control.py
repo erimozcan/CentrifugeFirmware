@@ -406,6 +406,20 @@ class Centrifuge(object):
         if wait:
             self.wait_until(lambda s: s.get("LOCKCMD") == 0, timeout, "the lock to release")
 
+    def lock_percent(self, pct, wait=True, timeout=10.0):
+        """DEBUG: drive the lock to an explicit travel, 0 (retracted) to 100 (extended).
+
+        Bench aid for the bucket-sweep hold: find the travel that just clears the
+        buckets, then set LOCK_PULSE_SWEEP_US in config.h to match.
+        """
+        pct = int(pct)
+        if not 0 <= pct <= 100:
+            raise ValueError("lock travel must be 0..100 %")
+        self._txn("LOCK_PCT %d" % pct)
+        if wait:
+            self.wait_until(lambda s: s.get("LOCKPCT") == pct, timeout,
+                            "the lock to reach %d%%" % pct)
+
     def home(self):
         """Capture the CURRENT angle as the tube-1 detent. Gantry must sit in a detent."""
         self._txn("HOME")

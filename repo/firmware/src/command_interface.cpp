@@ -319,6 +319,29 @@ void CommandInterface::handleLine(char *line, PendingCommand &pending, const Sys
     return;
   }
 
+  // LOCK_PCT <0-100>: drive the lock to an explicit travel (0 = retracted, 100 = fully
+  // extended). Bench/tuning aid for the bucket-sweep hold -- find the number that just
+  // clears the buckets, then set LOCK_PULSE_SWEEP_US to match. Same stopped-only rule as
+  // LOCK/UNLOCK, and the rpm safety net still retracts it if the rotor is turning.
+  if (strcmp(cmdToken, "LOCK_PCT") == 0) {
+    if (!isLockControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
+      Protocol::sendErr(seq, "ILLEGAL_STATE");
+      return;
+    }
+    char *valToken = strtok_r(nullptr, " ", &savePtr);
+    int32_t pct = 0;
+    if (valToken == nullptr || !Protocol::parseInt32(valToken, pct) || pct < 0 || pct > 100) {
+      Protocol::sendErr(seq, "BAD_FORMAT");
+      return;
+    }
+    noInterrupts();
+    pending.hasLockPct = true;
+    pending.lockPct = static_cast<uint8_t>(pct);
+    interrupts();
+    Protocol::sendOk(seq, "QUEUED=1");
+    return;
+  }
+
   if (strcmp(cmdToken, "DOOR_OPEN") == 0) {
     if (!isDoorControlState(ctx.state) || isMachineMotionCommandBlocked(ctx)) {
       Protocol::sendErr(seq, "ILLEGAL_STATE");

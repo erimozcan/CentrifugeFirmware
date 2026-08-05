@@ -98,8 +98,9 @@
 // Pulse -> travel is linear: extend % = (2000 - pulse) / 10.
 #define LOCK_PULSE_LOCKED_US   1000  // 1.0 ms = full extend = LOCKED
 #define LOCK_PULSE_UNLOCKED_US 2000  // 2.0 ms = retract = UNLOCKED
-#define LOCK_PULSE_SWEEP_US    1600  // 40% extend = bucket-sweep hold (was 50% =
-                                     // 1500; reached too far on the bench 2026-08-05)
+#define LOCK_PULSE_SWEEP_US    1700  // 30% extend = bucket-sweep hold (50% then 40%
+                                     // both reached too far; bench 2026-08-05).
+                                     // Tune live with LOCK_PCT <0-100>, then set here.
 
 // WS2812 addressable LED strip on D11 (GPIO38, via RMT). Adafruit_NeoPixel.
 #define PIN_LED_STRIP        D11   // GPIO38 (data, via RMT)
@@ -151,6 +152,13 @@
 #define HAS_LED_STRIP 0   // no WS2812 driver on the Due prototype
 #define HAS_AUDIO 0       // no DFPlayer wired on the Due prototype
 #define HAS_WIFI 0        // Due has no WiFi
+// The Due drives the lock with a plain digital output (no servo), but the SHARED state
+// machine still resolves a servo pulse before handing it to the guard, which ignores it
+// on this target. Define the same endpoints so that arithmetic compiles and stays
+// meaningful if a servo is ever fitted to the prototype.
+#define LOCK_PULSE_LOCKED_US   1000
+#define LOCK_PULSE_UNLOCKED_US 2000
+#define LOCK_PULSE_SWEEP_US    1700
 
 #endif
 

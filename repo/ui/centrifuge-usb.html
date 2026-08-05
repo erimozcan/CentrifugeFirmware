@@ -349,8 +349,16 @@
           <button id="btnDbgLock" class="ctl">🔒 Lock</button>
           <button id="btnDbgUnlock" class="ctl">🔓 Unlock</button>
         </div>
+        <div class="row" style="margin-top:10px">
+          <label class="field" style="flex-direction:row; align-items:center; gap:10px; text-transform:none; letter-spacing:0">
+            Lock travel <input type="range" id="lockPctSlider" min="0" max="100" step="5" value="30" style="width:200px">
+            <span class="mono" id="lockPctVal" style="color:var(--txt2)">30%</span>
+          </label>
+        </div>
         <div class="hint">Manual lock/unlock overrides the automatic gantry policy while stopped (SAFE IDLE / BOOT);
-          it clears when a run or rotate starts, and the lock is always released while the rotor turns.</div>
+          it clears when a run or rotate starts, and the lock is always released while the rotor turns.
+          <b>Lock travel</b> drives the pin to an explicit position (0 = retracted, 100 = fully in) for tuning the
+          bucket-sweep hold — find the depth that just clears the buckets, then set LOCK_PULSE_SWEEP_US to match.</div>
       </div>
 
       <div class="subcard">
@@ -675,6 +683,12 @@ function render(f) {
   $('metaTube').textContent = 'Tube ' + (tube ? tube : '—');
   $('metaDoor').textContent = 'Door ' + (DOOR_NAMES[f.DOOR] ?? f.DOOR);
   $('metaLock').textContent = 'Lock ' + (locked ? 'engaged' : 'released');
+  // Track the travel the firmware is actually driving (LOCKPCT), so the slider stays
+  // honest after a Lock/Unlock press or a run -- but never yank it out from under a drag.
+  if (f.LOCKPCT != null && document.activeElement !== $('lockPctSlider')) {
+    $('lockPctSlider').value = f.LOCKPCT;
+    $('lockPctVal').textContent = f.LOCKPCT + '%';
+  }
 
   // ---- door panel ----
   const dmoving = f.DOORMOVE === 1;
@@ -822,6 +836,10 @@ $('btnHome').onclick = () => cmd('HOME','home');
 $('btnDoorStop').onclick = () => cmd('DOOR_STOP','door stop');
 $('btnDbgLock').onclick = () => cmd('LOCK','lock');
 $('btnDbgUnlock').onclick = () => cmd('UNLOCK','unlock');
+// Lock travel: live while dragging (label only), command on release so a drag doesn't
+// flood the link with a setpoint per pixel.
+$('lockPctSlider').oninput = e => { $('lockPctVal').textContent = e.target.value+'%'; };
+$('lockPctSlider').onchange = e => cmd('LOCK_PCT '+e.target.value,'lock travel');
 $('btnCalStart').onclick = () => cmd('CAL_START','esc calibration start');
 $('btnCalStop').onclick = () => cmd('CAL_STOP','esc calibration stop');
 $('btnCalStatus').onclick = () => cmd('CAL_STATUS','esc calibration status');

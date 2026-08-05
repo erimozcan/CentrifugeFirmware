@@ -207,6 +207,11 @@ bool sendStatus(int32_t seq, const SystemContext &ctx) {
   idx = appendLiteral(line, sizeof(line), idx, " LOCKCMD=");
   idx = appendInt32(line, sizeof(line), idx, ctx.lockActuatorCommanded ? 1 : 0);
 
+  // Actual lock travel being driven (0 = retracted, 100 = fully extended). Reads back
+  // LOCK_PCT while tuning the bucket-sweep hold.
+  idx = appendLiteral(line, sizeof(line), idx, " LOCKPCT=");
+  idx = appendInt32(line, sizeof(line), idx, static_cast<int32_t>(ctx.lockPctOut));
+
   idx = appendLiteral(line, sizeof(line), idx, " ENABLE=");
   idx = appendInt32(line, sizeof(line), idx, ctx.motorEnableOutput ? 1 : 0);
 
