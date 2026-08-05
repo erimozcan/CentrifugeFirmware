@@ -56,6 +56,9 @@ In the app's setup screen for the protocol, pick an **Action** and press Run:
 - **Go to tube** — indexes the gantry so that tube faces the pipette.
 - **Lock gantry** / **Unlock gantry** — debug controls that force the lock in or
   out, the same override the console's buttons use.
+- **Set lock travel** — debug: drive the pin to an explicit percentage (0 =
+  retracted, 100 = fully in). Used to tune the bucket-sweep depth; the browser
+  console has the same thing as a slider in its debug drawer.
 - **Report status only**
 
 Before any door or rotor motion the protocol calls `protocol.home()` to get the

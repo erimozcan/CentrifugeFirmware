@@ -6,11 +6,13 @@ set Force / Time if you're spinning, and press Run.
 
     Action                     What it does
     -------------------------  ------------------------------------------------
-    Spin (Force + Time)        close the door, spin, sweep the buckets down,
-                               re-lock the gantry, open the door
+    Spin (Force + Time)        the full cycle: close the door, ramp up, hold at
+                               speed, ramp down, settle, index to a detent, sweep
+                               the buckets flat, re-index, lock, open the door
     Open door / Close door     motorised door, same as the console's buttons
     Go to tube                 index the gantry so that tube faces the pipette
     Lock / Unlock gantry       DEBUG: force the gantry lock in or out
+    Set lock travel            DEBUG: drive the pin to an explicit % (bench tuning)
     Report status only         read the machine back into the run log
 
 Wiring: the Nano's USB goes into any USB port on the OT-2's Raspberry Pi. The
@@ -463,6 +465,7 @@ ACTIONS = [
     {"display_name": "Go to tube", "value": "rotate"},
     {"display_name": "Lock gantry (debug)", "value": "lock"},
     {"display_name": "Unlock gantry (debug)", "value": "unlock"},
+    {"display_name": "Set lock travel (debug)", "value": "lock_pct"},
     {"display_name": "Report status only", "value": "status"},
 ]
 
@@ -503,6 +506,15 @@ def add_parameters(parameters):
         description="Spin-up and spin-down time. Gentle ramps keep loaded buckets settled.",
     )
     parameters.add_int(
+        display_name="Lock travel",
+        variable_name="lock_pct",
+        default=40,
+        minimum=0,
+        maximum=100,
+        unit="%",
+        description="Debug: drive the lock pin to an explicit position (0 = retracted, 100 = fully in).",
+    )
+    parameters.add_int(
         display_name="Tube",
         variable_name="tube",
         default=1,
@@ -530,6 +542,8 @@ def run(protocol):
             % (params.rcf, rcf_to_rpm(params.rcf), params.minutes, params.ramp_seconds))
     elif action == "rotate":
         protocol.comment("  tube %d" % params.tube)
+    elif action == "lock_pct":
+        protocol.comment("  lock travel %d%%" % params.lock_pct)
 
     if protocol.is_simulating():
         # Protocol analysis runs this file with no hardware attached, so the serial
@@ -558,6 +572,8 @@ def run(protocol):
             centrifuge.lock()
         elif action == "unlock":
             centrifuge.unlock()
+        elif action == "lock_pct":
+            centrifuge.lock_percent(params.lock_pct)
         elif action == "status":
             pass
         else:

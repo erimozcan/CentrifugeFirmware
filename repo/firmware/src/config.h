@@ -98,9 +98,10 @@
 // Pulse -> travel is linear: extend % = (2000 - pulse) / 10.
 #define LOCK_PULSE_LOCKED_US   1000  // 1.0 ms = full extend = LOCKED
 #define LOCK_PULSE_UNLOCKED_US 2000  // 2.0 ms = retract = UNLOCKED
-#define LOCK_PULSE_SWEEP_US    1700  // 30% extend = bucket-sweep hold (50% then 40%
-                                     // both reached too far; bench 2026-08-05).
-                                     // Tune live with LOCK_PCT <0-100>, then set here.
+#define LOCK_PULSE_SWEEP_US    1600  // 40% extend = bucket-sweep hold. FINAL: bench-tuned
+                                     // 2026-08-05 (50% reached too far, 30% too shallow).
+                                     // Re-tune live with LOCK_PCT <0-100> / the UI's Lock
+                                     // travel slider, then set the result here.
 
 // WS2812 addressable LED strip on D11 (GPIO38, via RMT). Adafruit_NeoPixel.
 #define PIN_LED_STRIP        D11   // GPIO38 (data, via RMT)

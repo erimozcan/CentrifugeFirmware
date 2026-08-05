@@ -107,13 +107,25 @@ def test_controls_the_operator_ui_has_are_all_reachable():
     for method in ("def door_open", "def door_close", "def rotate",
                    "def spin", "def lock", "def unlock"):
         assert method in client, "client is missing %s" % method
+    assert "def lock_percent" in client, "client is missing def lock_percent"
     protocol = read(PROTOCOL)
-    for action in ("door_open", "door_close", "rotate", "spin", "lock", "unlock"):
+    for action in ("door_open", "door_close", "rotate", "spin", "lock", "unlock", "lock_pct"):
         assert '"value": "%s"' % action in protocol, "protocol action %s missing" % action
     console = read(CONSOLE)
     for command in ('verb == "open"', 'verb == "close"', 'verb == "tube"',
-                    'verb == "run"', 'verb == "lock"', 'verb == "unlock"'):
+                    'verb == "run"', 'verb == "lock"', 'verb == "unlock"',
+                    'verb == "lockpct"'):
         assert command in console, "console is missing %s" % command
+
+
+def test_every_protocol_action_is_actually_dispatched():
+    # An action in the dropdown that no branch handles would fail only at run time on the
+    # robot, with the door already homed and the operator waiting.
+    protocol = read(PROTOCOL)
+    listed = set(re.findall(r'"value": "(\w+)"', protocol))
+    run_body = protocol[protocol.index("\ndef run(protocol):"):]
+    for action in sorted(listed):
+        assert 'action == "%s"' % action in run_body, "action %s is listed but never run" % action
 
 
 def test_client_asserts_dtr_on_the_native_usb_cdc_port():
