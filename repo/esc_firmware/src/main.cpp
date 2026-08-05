@@ -180,6 +180,14 @@
                                                 // friction gantry this had to be ~27 RPM so
                                                 // the P-term could hold breakaway -- if
                                                 // friction ever returns, revisit.)
+#define INDEX_ALIGN_SETTLE_MS 900U              // after a FRESH FOC alignment only: let the
+                                                // shaft stop and the encoder catch up before
+                                                // the move is planned. initFOC() physically
+                                                // twitches the rotor, and the target used to
+                                                // be computed from the angle read on the very
+                                                // next line -- stale and mid-twitch, so the
+                                                // first index after power-up shot past the
+                                                // tube and walked back (bench 2026-08-05).
 #define INDEX_ACCEL_RADPS2  (1.0f * REV)        // approach accel limit (jerk guard): 0 -> FAST
                                                 // in ~0.5 s. Stepping the crawl setpoint
                                                 // 0 -> FAST launched the gantry hard enough
@@ -761,8 +769,40 @@ static void linkIndex(int tube) {
     return;
   }
   if (stage != CLOSEDLOOP) enterStage(CLOSEDLOOP);
+  bool fresh_align = !foc_ready;       // arm() below will physically twitch the rotor
   if (!armed) arm();                   // aligns on the first arm (needs bus power)
   if (!armed) { Serial.println("ERR INDEX not armed (bus power? align failed)"); return; }
+  // arm() can BLOCK for seconds doing the FOC alignment, which is far longer than
+  // LINK_WD_MS -- the comms watchdog then fired the moment we returned and disarmed the
+  // move we were setting up. The master is not dead, we were busy: re-feed the watchdog.
+  last_link_ms = millis();
+
+  // Run the move on the CRAWL profile with the INDEX torque ceiling (disarm() restores
+  // SPIN + the global current limit). PID_velocity.limit must be set explicitly --
+  // SimpleFOC only copies current_limit into it at init(). Set up BEFORE the settle
+  // below so that hold actually runs on the crawl gains.
+  applyPidProfile(CRAWL_PROFILE);
+  motor.current_limit = INDEX_CURRENT_A;
+  motor.PID_velocity.limit = INDEX_CURRENT_A;
+  motor.controller = MotionControlType::velocity;
+
+  if (fresh_align) {
+    // initFOC() just swung the shaft ("motor twitches once"). encoder.getAngle() is a
+    // CACHED value that only moves when the sensor is updated, and nothing updates it
+    // between arm() returning and the target maths below -- so the move used to be
+    // planned from a stale, mid-twitch angle and landed a long way past the tube. Hold
+    // zero velocity until the shaft is genuinely still, updating the sensor as we go.
+    uint32_t settle_start = millis();
+    while ((uint32_t)(millis() - settle_start) < INDEX_ALIGN_SETTLE_MS) {
+      motor.loopFOC();                 // drives the phases AND refreshes the encoder
+      motor.move(0.0f);
+      last_link_ms = millis();         // busy, not deaf -- see the note above arm()
+      if ((uint32_t)(millis() - settle_start) > 200U &&
+          fabsf(encoder.getVelocity()) < INDEX_SETTLE_VEL) {
+        break;                         // stopped early -- no need to burn the full dwell
+      }
+    }
+  }
 
   // Shortest move to the tube's ABSOLUTE detent angle (home_ref_rad = tube 0's detent).
   float target_mech = _normalizeAngle(home_ref_rad + (float)tube * TUBE_STEP_RAD);
@@ -780,13 +820,6 @@ static void linkIndex(int tube) {
   idx_ramp_vel  = 0.0f;      // every move launches from rest through the jerk guard
   idx_ramp_us   = micros();
   stop_then_disarm = false;
-  // Run the move on the CRAWL profile with the INDEX torque ceiling (disarm() restores
-  // SPIN + the global current limit). PID_velocity.limit must be set explicitly --
-  // SimpleFOC only copies current_limit into it at init().
-  applyPidProfile(CRAWL_PROFILE);
-  motor.current_limit = INDEX_CURRENT_A;
-  motor.PID_velocity.limit = INDEX_CURRENT_A;
-  motor.controller = MotionControlType::velocity;
   Serial.print("OK INDEX "); Serial.println(tube);
 }
 

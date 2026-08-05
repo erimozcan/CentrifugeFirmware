@@ -38,7 +38,7 @@ class MotorInterface {
   void startRotateToNearestDetent();      // crawl to the nearest detent (post-spin re-lock)
 
   // Post-run bucket sweep: one slow full forward revolution (SWEEP_REV_TARGET) while the
-  // state machine holds the lock's sweeper extrusion at 50%. Build-agnostic: uses only
+  // state machine holds the lock's sweeper extrusion part-extended. Build-agnostic: uses only
   // SPIN + the "?"-polled STAT rev= telemetry, so it works with either rotate path.
   void startSweepTurn();                  // disarms any index hold, applies crawl torque
   void updateSweepTurn();                 // call each tick during STATE_RUN_SWEEP_TURN

@@ -235,7 +235,7 @@ void StateMachine::tick(
   // and put the lock into a bucket. Reconciling with the ESC is safe anywhere.
   bool atDetent = (ctx.state == STATE_BOOT || ctx.state == STATE_SAFE_IDLE);
   if (ctx.state == STATE_RUN_SWEEP_TURN) {
-    // Knockdown sweep: one slow full revolution with the lock's sweeper at 50%. Uses only
+    // Knockdown sweep: one slow full revolution with the lock's sweeper part-extended. Uses only
     // SPIN + rev= telemetry, so it is the same on both rotate paths.
     motor.updateSweepTurn();
   } else {
@@ -244,7 +244,7 @@ void StateMachine::tick(
   // ESC-native closed-loop position (needs the updated ESC firmware).
   if (indexingState || ctx.state == STATE_ROTATE_ENGAGE) {
     // RUN_INDEX targets tube 1's detent (any detent is lockable), and SWEEP_EXTEND keeps
-    // that same hold while the lock reaches its 50% extend; ROTATE targets its tube.
+    // that same hold while the lock reaches its sweep extend; ROTATE targets its tube.
     uint8_t escTube = (ctx.state == STATE_ROTATE_MOVING || ctx.state == STATE_ROTATE_ENGAGE)
                           ? (ctx.rotateTube - 1U)
                           : 0U;
@@ -307,7 +307,7 @@ void StateMachine::tick(
     ctx.lockActuatorCommanded = false;
   }
 
-  // Bucket-sweep hold: 50% extend puts the sweeper extrusion into the buckets' path,
+  // Bucket-sweep hold: a partial extend (LOCK_PULSE_SWEEP_US) puts the sweeper into
   // held through the extend dwell AND the slow knockdown turn. The rpm safety net still
   // wins -- the sweep crawls at SWEEP_TURN_RPM, well under SAFE_UNLOCK_RPM.
   ctx.lockSweepHold = (ctx.state == STATE_RUN_SWEEP_EXTEND ||
@@ -613,7 +613,7 @@ void StateMachine::applyStateProgression(SystemContext &ctx, MotorInterface &mot
       break;
 
     case STATE_RUN_SWEEP_EXTEND:
-      // Parked at the detent; tick() raises the 50% hold on entry. Dwell for the
+      // Parked at the detent; tick() raises the sweep hold on entry. Dwell for the
       // open-loop actuator to reach it, then start the knockdown revolution.
       if (timeReached(nowMs, ctx.stateEntryMs + SWEEP_EXTEND_MS)) {
         motor.startSweepTurn();

@@ -66,7 +66,7 @@ void HardwareGuard::updateMotorEnable(SystemState state) {
 void HardwareGuard::updateLockActuator(bool engaged, bool sweepHold) {
   lockActuator_ = engaged;
 #if defined(ARDUINO_ARCH_ESP32) && defined(LOCK_IS_SERVO)
-  // ENGAGED wins (full throw); else the partial 50% bucket-sweep hold; else retracted.
+  // ENGAGED wins (full throw); else the partial bucket-sweep hold; else retracted.
   // The state machine only raises sweepHold in the RUN_SWEEP states, where the lock
   // policy is "released", so the hold can never fight the LOCKED position.
   uint16_t pulseUs = engaged     ? LOCK_PULSE_LOCKED_US

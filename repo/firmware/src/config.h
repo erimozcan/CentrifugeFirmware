@@ -92,12 +92,14 @@
 #define LOCK_PULSE_MAX_US      2000
 // Per Actuonix PQ12-R datasheet (Rev D): 1.0 ms = fully EXTEND, 2.0 ms = fully RETRACT,
 // position linear in pulse width between them. On this build the mechanics are:
-// EXTENDED = locked, RETRACTED = unlocked. SWEEP is the 50% extend that puts the
+// EXTENDED = locked, RETRACTED = unlocked. SWEEP is the partial extend that puts the
 // pin's sweeper extrusion into the buckets' path for the post-run knockdown turn
 // (see STATE_RUN_SWEEP_*). (A 95% locked throw was tried 2026-08-01: not far enough.)
+// Pulse -> travel is linear: extend % = (2000 - pulse) / 10.
 #define LOCK_PULSE_LOCKED_US   1000  // 1.0 ms = full extend = LOCKED
 #define LOCK_PULSE_UNLOCKED_US 2000  // 2.0 ms = retract = UNLOCKED
-#define LOCK_PULSE_SWEEP_US    1500  // 50% extend = bucket-sweep hold
+#define LOCK_PULSE_SWEEP_US    1600  // 40% extend = bucket-sweep hold (was 50% =
+                                     // 1500; reached too far on the bench 2026-08-05)
 
 // WS2812 addressable LED strip on D11 (GPIO38, via RMT). Adafruit_NeoPixel.
 #define PIN_LED_STRIP        D11   // GPIO38 (data, via RMT)
@@ -243,8 +245,8 @@
 // short of the full rev so the re-index approaches the detent cleanly (forward on
 // the legacy crawl; either way for ESC INDEX), then the normal re-index + full
 // lock + door-open follow.
-#define SWEEP_EXTEND_MS  1500U   // let the lock reach 50% (10 mm, ~1 s at the 5 V rail's
-                                 // ~12.5 mm/s) before the turn starts
+#define SWEEP_EXTEND_MS  1500U   // let the lock reach the sweep hold (~8 mm, well under a
+                                 // second at the 5 V rail's ~12.5 mm/s) before the turn
 #define SWEEP_TURN_RPM    30     // knockdown crawl speed (crawl profile; kept under
                                  // SAFE_UNLOCK_RPM so the rpm net never drops the hold)
 #define SWEEP_REV_TARGET  0.96f  // stop ~15 deg short of the full rev; the re-index

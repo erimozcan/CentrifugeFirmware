@@ -337,7 +337,7 @@ void MotorInterface::startRotateToNearestDetent() {
 
 // ---- Post-run bucket-sweep turn ------------------------------------------------------
 // One slow full forward revolution; the state machine holds the lock's sweeper extrusion
-// at 50% so every bucket is knocked flat as it passes. Progress is measured on the ESC's
+// part-extended so every bucket is knocked flat as it passes. Progress is measured on the ESC's
 // CUMULATIVE rev= (encoder revs since ESC boot -- persists across arm/disarm), so a
 // circular-angle target can't be used (start == end mod 1). Universal verbs only.
 void MotorInterface::startSweepTurn() {

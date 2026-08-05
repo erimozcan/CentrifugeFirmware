@@ -35,10 +35,10 @@ enum SystemState : uint8_t {
   // actually mesh -- a spin stops the rotor at a random angle, not a lockable position.
   STATE_RUN_INDEX = 18,
   // Post-spin bucket-sweep pass (door still closed): after RUN_INDEX first parks at a
-  // detent, the lock extends to 50% -- its sweeper extrusion into the buckets' path --
+  // detent, the lock part-extends -- its sweeper extrusion into the buckets' path --
   // and the gantry does one slow full turn, knocking every bucket flat as it passes.
   // Then RUN_INDEX runs again and the normal full lock + door-open follow.
-  STATE_RUN_SWEEP_EXTEND = 19, // parked at the detent: lock extending to the 50% hold
+  STATE_RUN_SWEEP_EXTEND = 19, // parked at the detent: lock extending to the sweep hold
   STATE_RUN_SWEEP_TURN = 20    // slow full knockdown revolution with the hold in place
 };
 
@@ -184,7 +184,7 @@ struct SystemContext {
   uint8_t currentTube;     // 0 = unknown (e.g. after a spin), else the last indexed tube
   uint32_t rotateDeadlineMs;
   bool sweepDone;          // knockdown turn finished -> next RUN_INDEX locks + opens
-  bool lockSweepHold;      // lock is holding the partial 50% sweep extend right now
+  bool lockSweepHold;      // lock is holding the partial sweep extend right now
   bool detentOk;           // crush guard: the pin is over a verified detent right now
   int32_t detentErrDeg10;  // deg x10 to the nearest detent (-1 = no reference / stale)
   bool homed;              // detent reference captured (mirror of MotorInterface::homeSet())
@@ -240,7 +240,7 @@ inline bool gantryLockEngaged(SystemState state) {
     case STATE_ROTATE_RELEASE:   // releasing so the gantry can be indexed
     case STATE_ROTATE_MOVING:    // motor is moving the gantry to the next tube
     case STATE_RUN_INDEX:        // post-spin: crawling to the nearest detent before re-lock
-    case STATE_RUN_SWEEP_EXTEND: // bucket sweep: never fully locked -- the 50% hold is
+    case STATE_RUN_SWEEP_EXTEND: // bucket sweep: never fully locked -- the sweep hold is
     case STATE_RUN_SWEEP_TURN:   // driven separately via lockSweepHold
       return false;   // released (spinning / about to spin / coasting / indexing)
     default:
